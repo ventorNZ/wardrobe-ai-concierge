@@ -7,6 +7,7 @@ async function getItems() {
   const { data, error } = await supabase
     .from("wardrobe_items")
     .select("*")
+    .eq("is_archived", false)
     .order("created_at", { ascending: false })
     .limit(24);
 
@@ -32,7 +33,7 @@ export default async function HomePage() {
           <span className="eyebrow">The Wardrobe</span>
           <h1>Your day, dressed and explained.</h1>
           <p className="lede">
-            Build the AI wardrobe assistant you actually want: bulk upload your closet, auto-classify every piece, let the stylist agent brief your day, then preview the recommendation on your real body reference.
+            Build the AI wardrobe assistant you actually want: separate profiles for Manny and Yess, multi-angle wardrobe items, live-weather styling, voice briefs, saved sessions, and true per-look try-on previews.
           </p>
           <div className="button-row">
             <a className="primary-link" href="/upload">Bulk upload wardrobe</a>
@@ -70,7 +71,7 @@ export default async function HomePage() {
           <article className="preview-step">
             <span className="step-number">03</span>
             <h3>See it on you</h3>
-            <p>Instead of a mannequin, each recommended look feeds directly into Dress Me so you can preview the outfit on your real body reference photo.</p>
+            <p>Each recommended look now gets its own generated preview. The app no longer shows the raw body reference as a fake “on you” image.</p>
           </article>
         </div>
       </section>

@@ -22,9 +22,33 @@ export type LaundryStatus =
   | "drying"
   | "unavailable";
 
+export type WardrobeProfile = {
+  id: string;
+  owner_id: string;
+  display_name: string;
+  relationship?: string | null;
+  style_profile?: string | null;
+  default_body_item_id?: string | null;
+  is_active?: boolean | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+export type WardrobeItemPhoto = {
+  id: string;
+  wardrobe_item_id: string;
+  image_url: string;
+  storage_path?: string | null;
+  source_item_id?: string | null;
+  angle_label?: string | null;
+  is_primary?: boolean | null;
+  created_at: string;
+};
+
 export type WardrobeItem = {
   id: string;
   owner_id: string;
+  profile_id?: string | null;
   name: string;
   category: WardrobeCategory;
   subcategory?: string | null;
@@ -55,7 +79,13 @@ export type WardrobeItem = {
   wear_count?: number | null;
   image_url: string;
   storage_path?: string | null;
+  is_archived?: boolean | null;
+  canonical_item_id?: string | null;
+  angle_count?: number | null;
+  image_role?: string | null;
+  photos?: WardrobeItemPhoto[];
   created_at: string;
+  updated_at?: string | null;
 };
 
 export type WardrobeClassification = {
@@ -79,4 +109,52 @@ export type WardrobeClassification = {
   body_reference_notes: string | null;
   assistant_summary: string;
   confidence: number;
+};
+
+export type StylistSession = {
+  id: string;
+  owner_id: string;
+  profile_id?: string | null;
+  selected_date: string;
+  day_context?: string | null;
+  weather_summary?: string | null;
+  desired_vibe?: string | null;
+  active_body_item_id?: string | null;
+  draft_prompt?: string | null;
+  last_recommendation?: unknown;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+
+export type DressMeSession = {
+  id: string;
+  owner_id: string;
+  profile_id?: string | null;
+  selected_date: string;
+  body_item_id?: string | null;
+  selected_item_ids?: string[] | null;
+  occasion?: string | null;
+  weather_summary?: string | null;
+  notes?: string | null;
+  last_output_data_url?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+export type OutfitPreview = {
+  id: string;
+  owner_id: string;
+  profile_id?: string | null;
+  stylist_session_id?: string | null;
+  look_label: string;
+  outfit_item_ids: string[];
+  body_item_id?: string | null;
+  prompt?: string | null;
+  status: "queued" | "generating" | "complete" | "failed";
+  output_image_url?: string | null;
+  output_base64?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at?: string | null;
 };

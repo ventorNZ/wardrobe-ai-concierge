@@ -8,7 +8,11 @@ import type { WardrobeClassification, WardrobeItem } from "@/lib/types";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY environment variable.");
+  return new OpenAI({ apiKey });
+}
 
 type RequestBody = {
   itemId: string;
@@ -104,7 +108,7 @@ export async function POST(request: NextRequest) {
 
     const item = data as WardrobeItem;
 
-    const response = await openai.responses.create({
+    const response = await getOpenAI().responses.create({
       model: process.env.OPENAI_VISION_MODEL || "gpt-5-mini",
       input: [
         {

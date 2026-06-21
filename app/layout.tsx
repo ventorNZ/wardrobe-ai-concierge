@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./styles.css";
+import ProfileSwitcher from "@/components/ProfileSwitcher";
 
 export const metadata: Metadata = {
   title: "The Wardrobe Concierge",
@@ -19,11 +20,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <em>AI concierge</em>
               </span>
             </a>
-            <div className="links">
-              <a href="/upload">Upload</a>
-              <a href="/wardrobe">Wardrobe</a>
-              <a href="/planner">Stylist</a>
-              <a href="/generate">Dress Me</a>
+            <div className="nav-actions">
+              <ProfileSwitcher />
+              <div className="links">
+                <a href="/upload">Upload</a>
+                <a href="/wardrobe">Wardrobe</a>
+                <a href="/planner">Stylist</a>
+                <a href="/generate">Dress Me</a>
+              </div>
             </div>
           </div>
         </nav>

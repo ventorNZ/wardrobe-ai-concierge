@@ -2,16 +2,25 @@ import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import type { WardrobeItem } from "@/lib/types";
+import { nzTodayIso } from "@/lib/nzTime";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY environment variable.");
+  return new OpenAI({ apiKey });
+}
 
 type RecommendBody = {
+  profileId?: string;
   dayContext: string;
   weather: string;
   vibe: string;
+  selectedDate?: string;
+  bodyId?: string;
+  sessionId?: string;
 };
 
 const recommendationSchema = {
@@ -74,33 +83,55 @@ function compactItem(item: WardrobeItem) {
     style_tags: item.style_tags,
     laundry_status: item.laundry_status,
     fit_status: item.fit_status,
+    angle_count: item.angle_count,
     summary: item.ai_summary
   };
 }
 
 function fallbackRecommendation(items: WardrobeItem[], body: RecommendBody) {
   const available = items.filter((item) => item.category !== "body_reference" && !["needs_wash", "drying", "unavailable"].includes(item.laundry_status || "clean"));
-  const top = available.find((item) => ["top", "outerwear"].includes(item.category));
-  const bottom = available.find((item) => item.category === "bottom");
-  const shoes = available.find((item) => item.category === "shoes");
-  const accessory = available.find((item) => item.category === "accessory");
-  const picked = [top, bottom, shoes, accessory].filter(Boolean) as WardrobeItem[];
+  const tops = available.filter((item) => item.category === "top");
+  const outerwear = available.filter((item) => item.category === "outerwear");
+  const bottoms = available.filter((item) => item.category === "bottom");
+  const shoes = available.filter((item) => item.category === "shoes");
+  const accessories = available.filter((item) => item.category === "accessory");
+
+  const makeLook = (label: string, offset: number) => {
+    const picked = [
+      tops[offset % Math.max(tops.length, 1)],
+      bottoms[offset % Math.max(bottoms.length, 1)],
+      shoes[offset % Math.max(shoes.length, 1)],
+      outerwear[offset % Math.max(outerwear.length, 1)],
+      accessories[offset % Math.max(accessories.length, 1)]
+    ].filter(Boolean) as WardrobeItem[];
+
+    return {
+      label,
+      item_ids: picked.map((item) => item.id),
+      summary: picked.map((item) => item.name).join(" + ") || "Upload more wardrobe items first",
+      why_it_works: "This fallback avoids items marked needs wash, drying or unavailable. Use the AI recommendation once the API key and model are configured.",
+      watch_outs: ["Fallback logic is basic"],
+      formality_score: Math.round(picked.reduce((sum, item) => sum + (item.formality_score ?? 5), 0) / Math.max(picked.length, 1)),
+      warmth_score: Math.round(picked.reduce((sum, item) => sum + (item.warmth_score ?? 4), 0) / Math.max(picked.length, 1))
+    };
+  };
 
   return {
     day_brief: `${body.dayContext} ${body.weather}`.trim(),
     stylist_positioning: "Clean, practical recommendation based on available wardrobe data.",
     missing_info: ["OpenAI recommendation failed, so this is a simple fallback selection."],
-    outfits: [
-      {
-        label: "Primary",
-        item_ids: picked.map((item) => item.id),
-        summary: picked.map((item) => item.name).join(" + ") || "Upload more wardrobe items first",
-        why_it_works: "This fallback avoids items marked needs wash, drying or unavailable. Use the AI recommendation once the API key and model are configured.",
-        watch_outs: ["Fallback logic is basic"],
-        formality_score: Math.round(picked.reduce((sum, item) => sum + (item.formality_score ?? 5), 0) / Math.max(picked.length, 1)),
-        warmth_score: Math.round(picked.reduce((sum, item) => sum + (item.warmth_score ?? 4), 0) / Math.max(picked.length, 1))
-      }
-    ]
+    outfits: [makeLook("Primary", 0), makeLook("Alternative", 1)].filter((look) => look.item_ids.length >= 2)
+  };
+}
+
+function keepOnlyValidIds(recommendation: ReturnType<typeof fallbackRecommendation>, usable: WardrobeItem[]) {
+  const validIds = new Set(usable.map((item) => item.id));
+  return {
+    ...recommendation,
+    outfits: recommendation.outfits.map((outfit) => ({
+      ...outfit,
+      item_ids: outfit.item_ids.filter((id) => validIds.has(id))
+    })).filter((outfit) => outfit.item_ids.length >= 2)
   };
 }
 
@@ -108,28 +139,57 @@ export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as RecommendBody;
     const supabaseAdmin = getSupabaseAdmin();
-    const { data, error } = await supabaseAdmin
+
+    let profileName = "Manny";
+    let profileStyle = "Modern executive, polished, camera-friendly, Auckland-weather aware.";
+
+    if (body.profileId) {
+      const { data: profile } = await supabaseAdmin
+        .from("wardrobe_profiles")
+        .select("display_name, style_profile")
+        .eq("id", body.profileId)
+        .maybeSingle();
+
+      if (profile?.display_name) profileName = profile.display_name;
+      if (profile?.style_profile) profileStyle = profile.style_profile;
+    }
+
+    let query = supabaseAdmin
       .from("wardrobe_items")
       .select("*")
+      .eq("is_archived", false)
       .order("created_at", { ascending: false });
+
+    if (body.profileId) query = query.eq("profile_id", body.profileId);
+
+    const { data, error } = await query;
 
     if (error) throw error;
     const items = (data ?? []) as WardrobeItem[];
     const usable = items.filter((item) => item.category !== "body_reference" && !["needs_wash", "drying", "unavailable"].includes(item.laundry_status || "clean"));
     if (usable.length < 2) {
-      return NextResponse.json({ recommendation: fallbackRecommendation(items, body) });
+      const fallback = fallbackRecommendation(items, body);
+      return NextResponse.json({ recommendation: fallback });
     }
 
     const prompt = `
 You are Wardrobe AI's senior personal stylist: polished, direct, practical, and fashion-literate.
-You are dressing Manuel using ONLY the wardrobe item IDs provided. Do not invent items.
+You are dressing ${profileName} using ONLY the wardrobe item IDs provided. Do not invent items.
 
-Personal style context:
-- Modern executive, not stiff corporate unless a client/supplier meeting requires it.
-- Online candidate interviews should feel approachable and modern.
-- Client/supplier meetings can be more elevated.
-- Auckland weather matters: cold/rain requires practical layering and shoe choice.
-- Laundry matters: do not choose needs_wash, drying, or unavailable items.
+Profile style context:
+${profileStyle}
+
+Rules:
+- Return real outfits that can actually be worn together.
+- Use only IDs from the available wardrobe JSON.
+- Do not choose body_reference items.
+- Do not choose needs_wash, drying, or unavailable items.
+- Respect Auckland weather and outside time.
+- Prefer complete outfits: top + bottom + shoes, with outerwear/accessory when useful.
+- If multiple photos/angles exist for an item, treat it as one item, not duplicates.
+
+Day/date:
+${body.selectedDate || "Not specified"}
 
 Day context:
 ${body.dayContext || "Not specified"}
@@ -143,11 +203,13 @@ ${body.vibe || "Not specified"}
 Available wardrobe items as JSON:
 ${JSON.stringify(usable.map(compactItem), null, 2)}
 
-Return 2 to 4 outfits. Each outfit should include a balanced set of items: ideally top/outerwear + bottom + shoes + accessory if available. Use only IDs from the list.
+Return 2 to 4 outfits. Each outfit should include a balanced set of item_ids.
 `.trim();
 
+    let recommendation: ReturnType<typeof fallbackRecommendation>;
+
     try {
-      const response = await openai.responses.create({
+      const response = await getOpenAI().responses.create({
         model: process.env.OPENAI_VISION_MODEL || "gpt-5-mini",
         input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
         text: {
@@ -161,12 +223,36 @@ Return 2 to 4 outfits. Each outfit should include a balanced set of items: ideal
       } as never);
 
       const raw = getOutputText(response);
-      const parsed = JSON.parse(raw);
-      return NextResponse.json({ recommendation: parsed });
+      recommendation = keepOnlyValidIds(JSON.parse(raw), usable);
+      if (!recommendation.outfits.length) recommendation = fallbackRecommendation(items, body);
     } catch (aiError) {
       console.error(aiError);
-      return NextResponse.json({ recommendation: fallbackRecommendation(items, body) });
+      recommendation = fallbackRecommendation(items, body);
     }
+
+    let sessionId = body.sessionId || "";
+    if (body.profileId) {
+      const sessionPayload = {
+        owner_id: "demo-user",
+        profile_id: body.profileId,
+        selected_date: body.selectedDate || nzTodayIso(),
+        day_context: body.dayContext || null,
+        weather_summary: body.weather || null,
+        desired_vibe: body.vibe || null,
+        active_body_item_id: body.bodyId || null,
+        draft_prompt: body.dayContext || null,
+        last_recommendation: recommendation,
+        updated_at: new Date().toISOString()
+      };
+
+      const saved = sessionId
+        ? await supabaseAdmin.from("stylist_sessions").update(sessionPayload).eq("id", sessionId).select("id").single()
+        : await supabaseAdmin.from("stylist_sessions").insert(sessionPayload).select("id").single();
+
+      if (!saved.error && saved.data?.id) sessionId = saved.data.id;
+    }
+
+    return NextResponse.json({ recommendation, sessionId });
   } catch (error) {
     console.error(error);
     return NextResponse.json(
