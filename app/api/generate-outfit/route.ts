@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI, { toFile } from "openai";
+import OpenAI from "openai";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { imageUrlToOpenAIFile } from "@/lib/openaiImage";
 import type { WardrobeItem, WardrobeItemPhoto } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -23,21 +24,13 @@ type GenerateBody = {
   notes?: string;
 };
 
-async function urlToFile(url: string, filename: string) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Could not download ${filename}`);
-  const contentType = response.headers.get("content-type") || "image/png";
-  const buffer = Buffer.from(await response.arrayBuffer());
-  return toFile(buffer, filename, { type: contentType });
-}
-
 function compactName(text: string) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 40) || "item";
 }
 
 async function getReferenceUrls(selected: WardrobeItem[]) {
   const supabaseAdmin = getSupabaseAdmin();
-  const selectedIds = selected.map((item) => item.id);
+  const selectedIds = selected.map((item) => item.id).filter(Boolean);
   const fallback = new Map(selected.map((item) => [item.id, [item.image_url].filter(Boolean)]));
 
   if (selectedIds.length === 0) return fallback;
@@ -101,6 +94,45 @@ Output:
 `.trim();
 }
 
+async function buildImageReferences(input: GenerateBody) {
+  const references: Awaited<ReturnType<typeof imageUrlToOpenAIFile>>[] = [];
+  const skipped: string[] = [];
+
+  try {
+    references.push(await imageUrlToOpenAIFile(input.body.image_url, "body-reference.png"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown body image error";
+    throw new Error(`Body reference image could not be prepared for generation. ${message}`);
+  }
+
+  const referenceUrls = await getReferenceUrls(input.selected);
+  for (const [itemId, urls] of referenceUrls.entries()) {
+    const item = input.selected.find((entry) => entry.id === itemId);
+    for (let index = 0; index < urls.length; index += 1) {
+      if (references.length >= 13) break;
+      try {
+        references.push(
+          await imageUrlToOpenAIFile(
+            urls[index],
+            `${compactName(item?.name || "wardrobe-item")}-${index + 1}.png`
+          )
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown image error";
+        skipped.push(`${item?.name || itemId}: ${message}`);
+      }
+    }
+  }
+
+  if (references.length < 2) {
+    throw new Error(
+      `No usable wardrobe item reference images could be prepared. ${skipped.length ? `Skipped: ${skipped.join(" | ")}` : ""}`.trim()
+    );
+  }
+
+  return { references, skipped };
+}
+
 export async function POST(request: NextRequest) {
   let previewId = "";
 
@@ -132,23 +164,10 @@ export async function POST(request: NextRequest) {
       if (!queued.error && queued.data?.id) previewId = queued.data.id;
     }
 
-    const referenceUrls = await getReferenceUrls(input.selected);
-    const clothingFiles: Awaited<ReturnType<typeof toFile>>[] = [];
-
-    for (const [itemId, urls] of referenceUrls.entries()) {
-      const item = input.selected.find((entry) => entry.id === itemId);
-      for (let index = 0; index < urls.length; index += 1) {
-        clothingFiles.push(await urlToFile(urls[index], `${compactName(item?.name || "wardrobe-item")}-${index + 1}.png`));
-      }
-    }
-
-    const references = [
-      await urlToFile(input.body.image_url, "body-reference.png"),
-      ...clothingFiles.slice(0, 12)
-    ];
+    const { references, skipped } = await buildImageReferences(input);
 
     const response = await getOpenAI().images.edit({
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1",
       image: references,
       prompt,
       size: "1024x1536"
@@ -164,7 +183,7 @@ export async function POST(request: NextRequest) {
       title: input.selected.map((item) => item.name).join(" + ").slice(0, 120),
       occasion: input.occasion || null,
       weather: input.weather || null,
-      notes: input.notes || null,
+      notes: skipped.length ? `${input.notes || ""}\nSkipped invalid image references: ${skipped.join(" | ")}`.trim() : input.notes || null,
       stylist_brief: prompt,
       body_item_id: input.body.id,
       selected_item_ids: selectedIds,
@@ -174,11 +193,11 @@ export async function POST(request: NextRequest) {
     if (previewId) {
       await supabaseAdmin
         .from("outfit_previews")
-        .update({ status: "complete", output_base64: imageBase64, updated_at: new Date().toISOString() })
+        .update({ status: "complete", output_base64: imageBase64, error_message: skipped.length ? `Skipped invalid image references: ${skipped.join(" | ")}` : null, updated_at: new Date().toISOString() })
         .eq("id", previewId);
     }
 
-    return NextResponse.json({ imageDataUrl, previewId });
+    return NextResponse.json({ imageDataUrl, previewId, skipped });
   } catch (error) {
     console.error(error);
     if (previewId) {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { imageUrlToBase64PngDataUrl } from "@/lib/openaiImage";
 import { wardrobeClassificationJsonSchema } from "@/lib/classificationSchema";
 import { cleanArray, safeCategory } from "@/lib/wardrobeTaxonomy";
 import type { WardrobeClassification, WardrobeItem } from "@/lib/types";
@@ -108,6 +109,11 @@ export async function POST(request: NextRequest) {
 
     const item = data as WardrobeItem;
 
+    const normalisedImageUrl = await imageUrlToBase64PngDataUrl(
+      item.image_url,
+      `${item.id || "wardrobe-item"}.png`
+    );
+
     const response = await getOpenAI().responses.create({
       model: process.env.OPENAI_VISION_MODEL || "gpt-5-mini",
       input: [
@@ -115,7 +121,7 @@ export async function POST(request: NextRequest) {
           role: "user",
           content: [
             { type: "input_text", text: buildPrompt(item, body.extraContext) },
-            { type: "input_image", image_url: item.image_url, detail: "high" }
+            { type: "input_image", image_url: normalisedImageUrl, detail: "high" }
           ]
         }
       ],

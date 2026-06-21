@@ -17,7 +17,8 @@
     "next": "latest",
     "openai": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "sharp": "^0.33.5"
   },
   "devDependencies": {
     "@types/node": "latest",
