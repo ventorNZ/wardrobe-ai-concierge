@@ -33,6 +33,13 @@ type SwapCandidate = {
   reason: string;
 };
 
+type CalendarConnectionStatus = {
+  provider: "google" | "outlook";
+  email?: string | null;
+  updated_at?: string | null;
+  expires_at?: string | null;
+};
+
 const WEATHER_PREF_KEY = "wardrobeAI:useLiveWeather";
 const CALENDAR_PREF_KEY = "wardrobeAI:useCalendarContext";
 const AUTOGEN_PREF_KEY = "wardrobeAI:autoMorningLooks";
@@ -51,7 +58,7 @@ function cleanSavedVibe(value?: string | null) {
 }
 
 const CASUAL_BRIEF_WORDS = /sunday|saturday|weekend|family|kids|children|home|errands|school run|casual|relaxed|park|brunch|lunch|afternoon|bbq|coffee|shopping|movies|walk/i;
-const EXPLICIT_FORMAL_WORDS = /formal|client|presentation|board|meeting|exec|office|interview|founder|camera|work|wedding|gala|suit|tie required/i;
+const EXPLICIT_FORMAL_WORDS = /black tie|wedding|gala|ceremony|formal dress|formal event|dress code|tie required|jacket required|suit required|must wear (a )?suit|full suit required/i;
 
 function isCasualBrief(dayContext?: string | null, vibe?: string | null) {
   const day = dayContext || "";
@@ -136,6 +143,8 @@ export default function PlannerPage() {
   const [dayContext, setDayContext] = useState("");
   const [weather, setWeather] = useState("");
   const [calendarContext, setCalendarContext] = useState("");
+  const [calendarConnections, setCalendarConnections] = useState<CalendarConnectionStatus[]>([]);
+  const [calendarStatusError, setCalendarStatusError] = useState("");
   const [vibe, setVibe] = useState("");
   const [useLiveWeather, setUseLiveWeather] = useState(true);
   const [useCalendar, setUseCalendar] = useState(true);
@@ -180,12 +189,28 @@ export default function PlannerPage() {
       const response = await fetch(url.toString());
       const payload = await readJson(response);
       setCalendarContext(payload.context || "No connected calendar yet.");
+      if (Array.isArray(payload.connections)) setCalendarConnections(payload.connections);
     } catch {
       setCalendarContext("Calendar not connected yet. Add meetings or plans in the brief if needed.");
     } finally {
       setCalendarLoading(false);
     }
   }, [activeProfileId, selectedDate]);
+
+  const loadCalendarStatus = useCallback(async () => {
+    if (!activeProfileId) return;
+    setCalendarStatusError("");
+    try {
+      const url = new URL("/api/calendar/status", window.location.origin);
+      url.searchParams.set("profileId", activeProfileId);
+      const response = await fetch(url.toString());
+      const payload = await readJson(response);
+      if (!response.ok) throw new Error(payload.error || "Calendar status failed");
+      setCalendarConnections(payload.connections || []);
+    } catch (err) {
+      setCalendarStatusError(err instanceof Error ? err.message : "Calendar status unavailable");
+    }
+  }, [activeProfileId]);
 
   useEffect(() => {
     const handle = window.setInterval(() => setNzClock(nzNowLabel()), 60_000);
@@ -210,8 +235,11 @@ export default function PlannerPage() {
   }, [useLiveWeather, loadWeather]);
 
   useEffect(() => {
-    if (useCalendar) void loadCalendarContext();
-  }, [useCalendar, loadCalendarContext]);
+    if (useCalendar) {
+      void loadCalendarContext();
+      void loadCalendarStatus();
+    }
+  }, [useCalendar, loadCalendarContext, loadCalendarStatus]);
 
   useEffect(() => {
     if (!activeProfileId || loadingProfiles) return;
@@ -460,15 +488,7 @@ export default function PlannerPage() {
           [sourceItemId]: payload.candidates ?? [],
         },
       }));
-      if (payload.suggestedId) {
-        setManualSwapChoices((current) => ({
-          ...current,
-          [lookLabel]: {
-            ...(current[lookLabel] ?? {}),
-            [sourceItemId]: current[lookLabel]?.[sourceItemId] || payload.suggestedId,
-          },
-        }));
-      }
+
     } catch (err) {
       setCardErrors((current) => ({ ...current, [lookLabel]: err instanceof Error ? err.message : "Could not load replacements" }));
     } finally {
@@ -477,13 +497,12 @@ export default function PlannerPage() {
   }
 
   function chooseSwapCandidate(lookLabel: string, sourceItemId: string, candidateId: string) {
-    setManualSwapChoices((current) => ({
-      ...current,
-      [lookLabel]: {
-        ...(current[lookLabel] ?? {}),
-        [sourceItemId]: candidateId,
-      },
-    }));
+    setManualSwapChoices((current) => {
+      const nextForLook = { ...(current[lookLabel] ?? {}) };
+      if (candidateId) nextForLook[sourceItemId] = candidateId;
+      else delete nextForLook[sourceItemId];
+      return { ...current, [lookLabel]: nextForLook };
+    });
   }
 
   async function swapSelected(outfit: OutfitPlan, lookLabel: string) {
@@ -530,6 +549,24 @@ export default function PlannerPage() {
       setCardErrors((current) => ({ ...current, [lookLabel]: err instanceof Error ? err.message : "Swap failed" }));
     } finally {
       setPreviewLoading("");
+    }
+  }
+
+  async function disconnectCalendar(provider: "google" | "outlook") {
+    if (!activeProfileId) return;
+    setCalendarStatusError("");
+    try {
+      const response = await fetch("/api/calendar/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileId: activeProfileId, provider }),
+      });
+      const payload = await readJson(response);
+      if (!response.ok) throw new Error(payload.error || "Calendar disconnect failed");
+      await loadCalendarStatus();
+      await loadCalendarContext();
+    } catch (err) {
+      setCalendarStatusError(err instanceof Error ? err.message : "Calendar disconnect failed");
     }
   }
 
@@ -605,12 +642,22 @@ export default function PlannerPage() {
               <span>📅</span>
               <strong>{calendarLoading ? "Calendar loading…" : "Calendar"}</strong>
               <small>{calendarContext || "Connect Google or Outlook so the stylist can read online vs in-person plans."}</small>
-              {activeProfileId ? (
+              {calendarConnections.length ? (
+                <div className="calendar-connected-list">
+                  {calendarConnections.map((connection) => (
+                    <span className="calendar-connected-pill" key={connection.provider}>
+                      {connection.provider === "google" ? "Google" : "Outlook"}{connection.email ? ` · ${connection.email}` : ""}
+                      <button type="button" onClick={() => void disconnectCalendar(connection.provider)}>Disconnect</button>
+                    </span>
+                  ))}
+                </div>
+              ) : activeProfileId ? (
                 <div className="calendar-connect-row">
-                  <a href={`/api/calendar/connect?provider=google&profileId=${activeProfileId}`}>Google</a>
-                  <a href={`/api/calendar/connect?provider=outlook&profileId=${activeProfileId}`}>Outlook</a>
+                  <a href={`/api/calendar/connect?provider=google&profileId=${activeProfileId}&returnTo=/planner`}>Connect Google</a>
+                  <a href={`/api/calendar/connect?provider=outlook&profileId=${activeProfileId}&returnTo=/planner`}>Connect Outlook</a>
                 </div>
               ) : null}
+              {calendarStatusError ? <small className="calendar-status-error">{calendarStatusError}</small> : null}
             </div>
           </div>
 
@@ -695,19 +742,20 @@ export default function PlannerPage() {
                         {(swapSelections[lookLabel] ?? []).map((sourceId) => {
                           const source = byId.get(sourceId);
                           const candidates = swapCandidateMap[lookLabel]?.[sourceId] ?? [];
-                          const chosenId = manualSwapChoices[lookLabel]?.[sourceId] || candidates[0]?.id || "";
+                          const chosenId = manualSwapChoices[lookLabel]?.[sourceId] || "";
                           return (
                             <div className="swap-picker-panel" key={sourceId}>
                               <div className="swap-picker-heading">
                                 <div>
                                   <strong>Replace {source?.name || "item"}</strong>
-                                  <small>Same category, ranked for today’s context — not random.</small>
+                                  <small>Same category, ranked for today’s calendar, weather, colour harmony and the current outfit — not random.</small>
                                 </div>
-                                <button type="button" className="secondary-button compact-action" onClick={() => candidates[0]?.id && chooseSwapCandidate(lookLabel, sourceId, candidates[0].id)}>
+                                <button type="button" className="secondary-button compact-action" onClick={() => chooseSwapCandidate(lookLabel, sourceId, "")}>
                                   Let AI choose
                                 </button>
                               </div>
                               {swapLoadingKey === `${lookLabel}:${sourceId}` && !candidates.length ? <p className="notice">Loading sensible replacements…</p> : null}
+                              {!chosenId && candidates.length ? <p className="notice">No manual pick selected — AI will choose the most coherent replacement when you apply swaps.</p> : null}
                               <div className="swap-candidate-grid">
                                 {candidates.map((candidate) => (
                                   <button
@@ -717,6 +765,7 @@ export default function PlannerPage() {
                                     onClick={() => chooseSwapCandidate(lookLabel, sourceId, candidate.id)}
                                   >
                                     {candidate.image_url ? <img src={candidate.image_url} alt={candidate.name} /> : null}
+                                    {candidate.id === candidates[0]?.id ? <span className="ai-recommended-badge">AI pick</span> : null}
                                     <strong>{candidate.name}</strong>
                                     <small>{candidate.reason}</small>
                                   </button>
@@ -732,7 +781,7 @@ export default function PlannerPage() {
                       {isSwapMode ? (
                         <>
                           <button type="button" className="primary-button" onClick={() => applySwapsOnly(outfit, lookLabel)} disabled={previewLoading === lookLabel || !hasSwaps}>
-                            {previewLoading === lookLabel ? "Applying…" : hasSwaps ? "Apply selected swaps" : "Select items first"}
+                            {previewLoading === lookLabel ? "Applying…" : hasSwaps ? "Apply swaps, then I’ll preview when you ask" : "Select items first"}
                           </button>
                           <button type="button" className="secondary-button" onClick={() => {
                             setSwapSelections((current) => ({ ...current, [lookLabel]: [] }));

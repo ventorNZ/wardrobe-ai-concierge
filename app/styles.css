@@ -847,7 +847,7 @@ input::placeholder, textarea::placeholder { color: #6b7280 !important; opacity: 
   .selected-outfit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
 }
 
-/* HOTFIX V7 FASHION CONCIERGE UX START */
+/* HOTFIX V8 CALENDAR FASHION CONCIERGE UX START */
 :root {
   --ux-ink: #171412;
   --ux-muted: #645c55;
@@ -1041,4 +1041,66 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-/* HOTFIX V7 FASHION CONCIERGE UX END */
+
+
+.calendar-connected-list {
+  grid-column: 2;
+  display: grid;
+  gap: .4rem;
+  margin-top: .45rem;
+}
+.calendar-connected-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  padding: .42rem .55rem;
+  border-radius: 14px;
+  background: rgba(232, 247, 236, .92);
+  color: #18351e;
+  border: 1px solid rgba(24, 53, 30, .14);
+  font-size: .76rem;
+  font-weight: 850;
+}
+.calendar-connected-pill button {
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,.9);
+  color: #18351e;
+  padding: .28rem .48rem;
+  font-size: .7rem;
+  font-weight: 900;
+}
+.calendar-status-error {
+  grid-column: 2;
+  color: #8a2f23 !important;
+  font-weight: 800;
+}
+.ai-recommended-badge {
+  justify-self: start;
+  border-radius: 999px;
+  padding: .18rem .42rem;
+  background: rgba(23,20,18,.9);
+  color: white;
+  font-size: .66rem;
+  font-weight: 900;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+.swap-candidate-card:not(.selected) .ai-recommended-badge {
+  background: rgba(23,20,18,.68);
+}
+.notice {
+  line-height: 1.35;
+}
+@media (max-width: 760px) {
+  .calendar-connected-list,
+  .calendar-status-error {
+    grid-column: 1;
+  }
+  .calendar-connected-pill {
+    display: grid;
+    justify-items: start;
+  }
+}
+/* HOTFIX V8 CALENDAR FASHION CONCIERGE UX END */

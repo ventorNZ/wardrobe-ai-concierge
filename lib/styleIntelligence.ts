@@ -22,7 +22,8 @@ export type StyleContext = {
 const CASUAL_WORDS = /sunday|saturday|weekend|family|kids|children|home|errands|school run|casual|relaxed|park|brunch|lunch|afternoon|bbq|barbecue|coffee|shopping|movies|walk|supermarket|chores|playdate/i;
 const ONLINE_WORDS = /online|zoom|teams|google meet|meet link|video|webinar|virtual|remote|camera|call|dial[- ]?in|hangout/i;
 const MEETING_WORDS = /meeting|client|presentation|board|exec|office|interview|founder|work|staff|stakeholder|workshop|onsite|in-person|in person/i;
-const FORMAL_WORDS = /formal|black tie|wedding|gala|ceremony|funeral|cocktail|suit|tie required|jacket required|dress code/i;
+const FORMAL_WORDS = /black tie|wedding|gala|ceremony|funeral|cocktail|formal dress|formal event|dress code|tie required|jacket required|suit required|must wear (a )?suit|full suit required/i;
+const NEGATED_SUIT_WORDS = /no full suit|not (a )?full suit|without (a )?suit|avoid (a )?suit|do not .*suit|don\'t .*suit|not .*suit/i;
 const ELEVATED_WORDS = /dinner|date|restaurant|event|party|birthday|drinks|show|concert|theatre|theater|bar/i;
 const LOCATION_WORDS = /office|city|onsite|on-site|in-person|in person|client site|restaurant|venue|school|campus|airport|travel/i;
 const LEGACY_FORMAL_VIBE = /polished|client-ready|camera-friendly|business|corporate|executive|formal/i;
@@ -43,7 +44,7 @@ export function inferStyleContext(input: StyleContextInput): StyleContext {
   const calendarAndDay = `${day}\n${calendar}`;
   const keywords: string[] = [];
 
-  if (FORMAL_WORDS.test(all)) {
+  if (FORMAL_WORDS.test(all) && !NEGATED_SUIT_WORDS.test(all)) {
     keywords.push("explicit formal dress code");
     return {
       mode: "formal",
@@ -223,9 +224,36 @@ export function rankItemsForContext(items: WardrobeItem[], context: StyleContext
     .sort((a, b) => contextFitScore(b, context) - contextFitScore(a, context));
 }
 
+
+function itemColour(item: WardrobeItem) {
+  return String((item as any).colour_primary || (item as any).colour || "").toLowerCase();
+}
+
+function isNeutralColour(colour: string) {
+  return /black|white|cream|ivory|beige|stone|grey|gray|charcoal|navy|brown|tan|camel|denim/.test(colour);
+}
+
+export function colourHarmonyScore(candidate: WardrobeItem, currentOutfit: WardrobeItem[]) {
+  const colour = itemColour(candidate);
+  if (!colour) return 0;
+  const others = currentOutfit.map(itemColour).filter(Boolean);
+  if (!others.length) return 0;
+  let score = 0;
+  if (isNeutralColour(colour)) score += 6;
+  for (const other of others) {
+    if (other === colour) score += 4;
+    if (isNeutralColour(other) && isNeutralColour(colour)) score += 3;
+    if (/navy/.test(other) && /brown|tan|camel|cream|white|grey|gray|denim/.test(colour)) score += 3;
+    if (/charcoal|grey|gray|black/.test(other) && /white|cream|navy|black|grey|gray/.test(colour)) score += 3;
+    if (/olive|green/.test(other) && /white|cream|navy|brown|tan|denim/.test(colour)) score += 3;
+  }
+  if (/neon|fluoro|very bright/.test(colour)) score -= 5;
+  return Math.max(-10, Math.min(16, score));
+}
+
 export function scoreSwapCandidate(candidate: WardrobeItem, currentOutfit: WardrobeItem[], sourceItem: WardrobeItem, context: StyleContext) {
   const trial = currentOutfit.map((item) => (item.id === sourceItem.id ? candidate : item));
-  let score = contextFitScore(candidate, context);
+  let score = contextFitScore(candidate, context) + colourHarmonyScore(candidate, currentOutfit);
   if (candidate.category === sourceItem.category) score += 18;
   if (candidate.id !== sourceItem.id) score += 10;
   if (!currentOutfit.some((item) => item.id === candidate.id)) score += 8;
@@ -252,7 +280,7 @@ export function swapReason(candidate: WardrobeItem, sourceItem: WardrobeItem, co
   }
   if (/jacket|coat|knit|wool/.test(c)) return "Adds useful warmth/layering without breaking the outfit.";
   if (/clean sneaker|loafer|boot/.test(c)) return "Fits the formality level and keeps the outfit grounded.";
-  return "Best category match for the day’s context and the existing outfit.";
+  return "Best category match for the day’s context, colour harmony and the existing outfit.";
 }
 
 export function stylistModeInstruction(context: StyleContext) {

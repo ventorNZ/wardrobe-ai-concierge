@@ -1,19 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exchangeOutlookCode, parseCalendarState, saveCalendarConnection } from "@/lib/calendarProviders";
+import { exchangeOutlookCode, parseCalendarState, saveCalendarConnection, setCalendarOwnerCookie } from "@/lib/calendarProviders";
 
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
   try {
     const code = request.nextUrl.searchParams.get("code");
+    if (!code) throw new Error("Missing Outlook OAuth code");
     const state = parseCalendarState(request.nextUrl.searchParams.get("state"));
-    if (!code) throw new Error("Missing Microsoft OAuth code");
     const token = await exchangeOutlookCode(request.url, code);
-    await saveCalendarConnection(state.profileId, "outlook", token);
-    return NextResponse.redirect(new URL("/planner?calendar=connected", request.url));
+    await saveCalendarConnection(state.ownerId, state.profileId, "outlook", token);
+    const redirectUrl = new URL(state.returnTo || "/planner", request.url);
+    redirectUrl.searchParams.set("calendar", "connected");
+    redirectUrl.searchParams.set("provider", "outlook");
+    return setCalendarOwnerCookie(NextResponse.redirect(redirectUrl), state.ownerId);
   } catch (error) {
-    const url = new URL("/planner", request.url);
-    url.searchParams.set("calendar_error", error instanceof Error ? error.message : "Outlook calendar connection failed");
-    return NextResponse.redirect(url);
+    const redirectUrl = new URL("/planner", request.url);
+    redirectUrl.searchParams.set("calendar", "error");
+    redirectUrl.searchParams.set("message", error instanceof Error ? error.message : "Outlook calendar failed");
+    return NextResponse.redirect(redirectUrl);
   }
 }
