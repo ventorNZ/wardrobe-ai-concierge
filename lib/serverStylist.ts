@@ -101,6 +101,22 @@ function compactItem(item: WardrobeItem) {
   };
 }
 
+
+function inferStyleIntent(input: RecommendInput) {
+  const text = `${input.dayContext || ""} ${input.vibe || ""}`.toLowerCase();
+  if (input.vibe?.trim()) return input.vibe.trim();
+  if (/sunday|saturday|weekend|family|kids|home|errands|school run|casual|relaxed|park|brunch|lunch|afternoon/.test(text)) {
+    return "Relaxed casual, comfortable, family-appropriate and weather-aware. Do not make it formal unless the user explicitly asks.";
+  }
+  if (/client|presentation|board|meeting|exec|office|interview|founder|camera|work/.test(text)) {
+    return "Smart but not stiff; polished only because the context is work-related.";
+  }
+  if (/dinner|date|restaurant|event|party/.test(text)) {
+    return "Elevated casual; intentional but not corporate.";
+  }
+  return "Natural, practical and context-led. Do not default to formal, client-ready or camera-ready.";
+}
+
 function average(items: WardrobeItem[], field: "formality_score" | "warmth_score", fallback: number) {
   if (!items.length) return fallback;
   return Math.max(1, Math.min(10, Math.round(items.reduce((sum, item) => sum + (item[field] ?? fallback), 0) / items.length)));
@@ -140,7 +156,7 @@ export function fallbackRecommendation(items: WardrobeItem[], input: RecommendIn
 
   return {
     day_brief: [input.dayContext, input.weather].filter(Boolean).join(" · ") || "Today’s practical wardrobe brief.",
-    stylist_positioning: "Two quick outfit options based on available wardrobe data.",
+    stylist_positioning: "Two quick outfit options for the actual day context.",
     missing_info: outfits.length < 2 ? ["Upload more complete wardrobe pieces to improve the recommendations."] : [],
     outfits,
   };
@@ -164,7 +180,7 @@ export function keepOnlyValidIds(recommendation: Recommendation, usable: Wardrob
 export async function recommendOutfits(input: RecommendInput) {
   const supabaseAdmin = getSupabaseAdmin();
   let profileName = "Manny";
-  let profileStyle = "Modern, polished, practical, Auckland-weather aware.";
+  let profileStyle = "Practical, personal, Auckland-weather aware. Match the actual day context rather than forcing formality.";
 
   if (input.profileId) {
     const { data: profile } = await supabaseAdmin
@@ -194,7 +210,8 @@ export async function recommendOutfits(input: RecommendInput) {
   if (usable.length < 2) {
     recommendation = fallbackRecommendation(items, input);
   } else {
-    const prompt = `You are Wardrobe Concierge's senior personal stylist. Be visual, direct and practical.
+    const styleIntent = inferStyleIntent(input);
+    const prompt = `You are Wardrobe Concierge's senior personal stylist. Be visual, direct and practical. Do not force formal styling.
 
 Dress ${profileName} using ONLY item IDs from the wardrobe JSON. Return exactly 2 looks: Look A and Look B.
 
@@ -202,7 +219,7 @@ Profile style: ${profileStyle}
 Date: ${input.selectedDate || nzTodayIso()}
 Day/calendar context: ${input.dayContext || "No calendar context supplied."}
 Weather context: ${input.weather || "No weather context supplied."}
-Desired vibe: ${input.vibe || "Polished, modern, comfortable."}
+Style intent: ${styleIntent}
 
 Rules:
 - Do not invent clothing.
@@ -212,6 +229,8 @@ Rules:
 - Prefer complete outfits: top + bottom + shoes, with outerwear/accessory when useful.
 - Treat multiple photo angles as one item, not duplicates.
 - Keep text short; the UI is visual.
+- If the context says family, Sunday, weekend, errands or casual time, keep formality low-to-medium and avoid corporate language.
+- Only use words like polished, client-ready or camera-friendly when the user context is actually work/client/on-camera.
 
 Available wardrobe items JSON:
 ${JSON.stringify(usable.map(compactItem), null, 2)}`;
@@ -249,7 +268,7 @@ export async function saveStylistSession(input: RecommendInput, recommendation: 
     selected_date: input.selectedDate || nzTodayIso(),
     day_context: input.dayContext || null,
     weather_summary: input.weather || null,
-    desired_vibe: input.vibe || null,
+    desired_vibe: input.vibe?.trim() || null,
     active_body_item_id: input.bodyId || null,
     draft_prompt: input.dayContext || null,
     last_recommendation: recommendation,

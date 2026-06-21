@@ -199,8 +199,8 @@ export default function GeneratePage() {
       <section className="ux-hero card">
         <div>
           <span className="eyebrow">Try-on</span>
-          <h1>{selectedItems.length ? "Saved outfit, ready to preview." : "Open Stylist first."}</h1>
-          <p className="lead-copy">This page no longer dumps the whole wardrobe. It starts with the outfit chosen by Stylist, then lets you manually adjust only when needed.</p>
+          <h1>{selectedItems.length ? "Try this outfit" : "Pick an outfit to preview"}</h1>
+          <p className="lead-copy">Start with the stylist look, or pick your own pieces. The closet stays hidden until you ask for it.</p>
         </div>
         <div className="ux-status-card">
           <strong>{activeProfile?.display_name || "Profile"}</strong>
@@ -231,8 +231,8 @@ export default function GeneratePage() {
             </div>
           ) : (
             <div className="empty-state-card mini-empty">
-              <h2>No outfit selected.</h2>
-              <p>Go to Stylist, choose Look A or B, then come back here.</p>
+              <h2>No outfit selected yet.</h2>
+              <p>Choose a stylist look, or tap “Pick my own outfit” to build one manually.</p>
               <a className="primary-button" href="/planner">Open Stylist</a>
             </div>
           )}
@@ -255,7 +255,7 @@ export default function GeneratePage() {
               {loading ? "Generating preview…" : result ? "Regenerate preview" : "Generate preview"}
             </button>
             <button type="button" className="secondary-button" onClick={() => setManualOpen((open) => !open)}>
-              {manualOpen ? "Hide closet" : "Manual closet picker"}
+              {manualOpen ? "Done picking" : "Pick my own outfit"}
             </button>
           </div>
           {profileError ? <p className="error">Profile error: {profileError}</p> : null}
@@ -270,7 +270,7 @@ export default function GeneratePage() {
       {manualOpen ? (
         <section className="card manual-picker-card">
           <div className="section-heading-row">
-            <div><span className="eyebrow dark">Manual override</span><h2>Pick only what you need.</h2></div>
+            <div><span className="eyebrow dark">Manual outfit</span><h2>Pick your own outfit.</h2></div>
           </div>
           <div className="visual-filter-toolbar">
             <div className="tab-row">

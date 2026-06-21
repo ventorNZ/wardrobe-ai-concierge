@@ -26,6 +26,19 @@ type Recommendation = {
 const WEATHER_PREF_KEY = "wardrobeAI:useLiveWeather";
 const CALENDAR_PREF_KEY = "wardrobeAI:useCalendarContext";
 const AUTOGEN_PREF_KEY = "wardrobeAI:autoMorningLooks";
+const LEGACY_FORCED_VIBES = [
+  "polished, modern, comfortable, camera-friendly.",
+  "polished, modern, comfortable",
+  "client-ready",
+];
+
+function cleanSavedVibe(value?: string | null) {
+  const text = (value || "").trim();
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  if (LEGACY_FORCED_VIBES.some((forced) => lower.includes(forced))) return "";
+  return text;
+}
 
 function selectedKey(profileId: string, dateIso: string) {
   return `wardrobeAI:dressMeSelection:${profileId || "demo"}:${dateIso}`;
@@ -96,7 +109,7 @@ export default function PlannerPage() {
   const [dayContext, setDayContext] = useState("");
   const [weather, setWeather] = useState("");
   const [calendarContext, setCalendarContext] = useState("");
-  const [vibe, setVibe] = useState("Polished, modern, comfortable, camera-friendly.");
+  const [vibe, setVibe] = useState("");
   const [useLiveWeather, setUseLiveWeather] = useState(true);
   const [useCalendar, setUseCalendar] = useState(true);
   const [autoMorning, setAutoMorning] = useState(true);
@@ -110,6 +123,7 @@ export default function PlannerPage() {
   const [previewLoading, setPreviewLoading] = useState("");
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [swapSelections, setSwapSelections] = useState<Record<string, string[]>>({});
+  const [swapModes, setSwapModes] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
   const lastHydration = useRef("");
 
@@ -222,14 +236,14 @@ export default function PlannerPage() {
       if (session?.id) setSessionId(session.id);
       setDayContext(session?.day_context || local.day_context || "");
       if (session?.weather_summary || local.weather_summary) setWeather(session?.weather_summary || local.weather_summary || "");
-      if (session?.desired_vibe || local.desired_vibe) setVibe(session?.desired_vibe || local.desired_vibe || vibe);
+      setVibe(cleanSavedVibe(session?.desired_vibe || local.desired_vibe || ""));
       if (session?.active_body_item_id || local.active_body_item_id) setBodyId(session.active_body_item_id || local.active_body_item_id || "");
       const savedRecommendation = (session?.last_recommendation || local.last_recommendation) as Recommendation | undefined;
       if (savedRecommendation?.outfits?.length) setResult({ ...savedRecommendation, outfits: savedRecommendation.outfits.slice(0, 2) });
       setHydrated(true);
     }
     void hydrate();
-  }, [activeProfileId, hydrationKey, loadingProfiles, selectedDate, vibe]);
+  }, [activeProfileId, hydrationKey, loadingProfiles, selectedDate]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -278,7 +292,7 @@ export default function PlannerPage() {
       selected_date: selectedDate,
       day_context: dayContext || null,
       weather_summary: useLiveWeather ? weather : "Weather ignored by preference.",
-      desired_vibe: vibe || null,
+      desired_vibe: cleanSavedVibe(vibe) || null,
       active_body_item_id: bodyId || null,
       last_recommendation: recommendation ?? result,
       id: nextSessionId || sessionId,
@@ -302,7 +316,7 @@ export default function PlannerPage() {
           selectedDate,
           dayContext: combinedContext() || "No calendar details added. Suggest a practical look for today.",
           weather: useLiveWeather ? weather || "Use live NZ weather if available." : "Ignore weather for this recommendation.",
-          vibe,
+          vibe: cleanSavedVibe(vibe),
         }),
       });
       const payload = await readJson(response);
@@ -415,6 +429,7 @@ export default function PlannerPage() {
     try {
       const updated = await swapSelected(outfit, lookLabel);
       await generateLook(updated, lookLabel);
+      setSwapModes((current) => ({ ...current, [lookLabel]: false }));
     } catch (err) {
       setCardErrors((current) => ({ ...current, [lookLabel]: err instanceof Error ? err.message : "Swap failed" }));
     } finally {
@@ -429,13 +444,13 @@ export default function PlannerPage() {
       <section className="ux-hero card">
         <div>
           <span className="eyebrow">AI stylist</span>
-          <h1>Today’s looks should already be waiting.</h1>
-          <p className="lead-copy">At 5:00am NZ time the app prepares two outfits using profile, weather and calendar context. You only regenerate when you want to swap something.</p>
+          <h1>Your outfits for today</h1>
+          <p className="lead-copy">Two options, picked for your day. Add anything special, change items if needed, then try one on.</p>
         </div>
         <div className="ux-status-card">
           <strong>{activeProfile?.display_name || "Profile"}</strong>
           <span>{nzClock} NZ</span>
-          <small>{hydrated && primaryLook ? "Morning looks loaded" : "Ready to create today’s two looks"}</small>
+          <small>{hydrated && primaryLook ? "Looks ready" : "Ready for today"}</small>
         </div>
       </section>
 
@@ -465,11 +480,11 @@ export default function PlannerPage() {
       <section className="stylist-command-grid">
         <div className="card command-card visual-first-card">
           <label className="big-brief-label">
-            <span>Anything unusual today?</span>
+            <span>Anything special today?</span>
             <textarea
               value={dayContext}
               onChange={(event) => setDayContext(event.target.value)}
-              placeholder="Optional. Example: yacht club breakfast, rain, cold, not sporty."
+              placeholder="Optional. Example: Sunday afternoon family time, school run, dinner out, client meeting."
               rows={4}
             />
           </label>
@@ -482,8 +497,8 @@ export default function PlannerPage() {
               </select>
             </label>
             <label>
-              <span>Vibe</span>
-              <input value={vibe} onChange={(event) => setVibe(event.target.value)} />
+              <span>Style preference (optional)</span>
+              <input value={vibe} onChange={(event) => setVibe(event.target.value)} placeholder="Leave blank unless you want a specific style." />
             </label>
           </div>
 
@@ -518,7 +533,7 @@ export default function PlannerPage() {
           <div className="section-heading-row">
             <div>
               <span className="eyebrow dark">Two outfits only</span>
-              <h2>{result.stylist_positioning}</h2>
+              <h2>Your two options</h2>
               <p>{result.day_brief}</p>
             </div>
           </div>
@@ -529,6 +544,7 @@ export default function PlannerPage() {
               const outfitItems = outfit.item_ids.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
               const selectedForSwap = new Set(swapSelections[lookLabel] ?? []);
               const hasSwaps = selectedForSwap.size > 0;
+              const isSwapMode = Boolean(swapModes[lookLabel]);
               return (
                 <article className="card look-card-visual" key={`${outfit.label}-${index}`}>
                   <div className="look-card-media">
@@ -548,24 +564,40 @@ export default function PlannerPage() {
                       <span className="small-chip">warmth {outfit.warmth_score}/10</span>
                     </div>
                     <p>{outfit.why_it_works}</p>
-                    <div className="swap-thumb-grid">
+                    {isSwapMode ? <p className="swap-helper">Select every item you want changed. Nothing regenerates until you confirm.</p> : null}
+                    <div className={isSwapMode ? "swap-thumb-grid swap-active" : "swap-thumb-grid"}>
                       {outfitItems.map((item) => (
-                        <button key={item.id} type="button" className={selectedForSwap.has(item.id) ? "swap-thumb selected" : "swap-thumb"} onClick={() => toggleSwap(lookLabel, item.id)}>
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={["swap-thumb", selectedForSwap.has(item.id) ? "selected" : "", !isSwapMode ? "read-only" : ""].filter(Boolean).join(" ")}
+                          onClick={() => { if (isSwapMode) toggleSwap(lookLabel, item.id); }}
+                          aria-pressed={selectedForSwap.has(item.id)}
+                        >
                           <img src={item.image_url} alt={item.name} />
-                          <span>{selectedForSwap.has(item.id) ? "Swap" : item.category}</span>
+                          <span>{selectedForSwap.has(item.id) ? "Will swap" : item.category}</span>
                         </button>
                       ))}
                     </div>
                     {cardErrors[lookLabel] ? <p className="error compact-error">{cardErrors[lookLabel]}</p> : null}
                     <div className="button-row wrap-buttons">
-                      {hasSwaps ? (
-                        <button type="button" className="primary-button" onClick={() => swapAndGenerate(outfit, lookLabel)} disabled={previewLoading === lookLabel}>
-                          {previewLoading === lookLabel ? "Swapping…" : `Swap selected + regenerate`}
-                        </button>
+                      {isSwapMode ? (
+                        <>
+                          <button type="button" className="primary-button" onClick={() => swapAndGenerate(outfit, lookLabel)} disabled={previewLoading === lookLabel || !hasSwaps}>
+                            {previewLoading === lookLabel ? "Regenerating…" : hasSwaps ? "Regenerate selected items" : "Select items first"}
+                          </button>
+                          <button type="button" className="secondary-button" onClick={() => {
+                            setSwapSelections((current) => ({ ...current, [lookLabel]: [] }));
+                            setSwapModes((current) => ({ ...current, [lookLabel]: false }));
+                          }}>Cancel swap</button>
+                        </>
                       ) : (
-                        <button type="button" className="primary-button" onClick={() => generateLook(outfit, lookLabel)} disabled={previewLoading === lookLabel || !bodyRef}>
-                          {previewLoading === lookLabel ? "Generating…" : previews[lookLabel] ? "Regenerate" : `Generate Look ${lookLabel}`}
-                        </button>
+                        <>
+                          <button type="button" className="primary-button" onClick={() => generateLook(outfit, lookLabel)} disabled={previewLoading === lookLabel || !bodyRef}>
+                            {previewLoading === lookLabel ? "Generating…" : previews[lookLabel] ? "Regenerate preview" : `Generate Look ${lookLabel}`}
+                          </button>
+                          <button type="button" className="secondary-button" onClick={() => setSwapModes((current) => ({ ...current, [lookLabel]: true }))}>Change items</button>
+                        </>
                       )}
                       <a className="secondary-button" href="/generate" onClick={() => saveForTryOn(outfit, lookLabel)}>Open try-on</a>
                     </div>
@@ -578,8 +610,8 @@ export default function PlannerPage() {
       ) : (
         <section className="card empty-state-card soft-empty visual-empty">
           <span className="eyebrow dark">Morning concierge</span>
-          <h2>No wardrobe dump. Two looks, then swap.</h2>
-          <p>The 5am job prepares this automatically. For now, create today’s two looks once, then only regenerate after selecting items to swap.</p>
+          <h2>Two looks, no wardrobe dump.</h2>
+          <p>Create today’s two looks once. To change a look, select all items you want swapped first, then regenerate once.</p>
         </section>
       )}
     </div>
