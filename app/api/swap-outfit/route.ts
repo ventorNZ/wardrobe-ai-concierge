@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import type { OutfitPlan } from "@/lib/serverStylist";
 import type { WardrobeItem } from "@/lib/types";
+import {
+  inferStyleContext,
+  isAvailableClothing,
+  isCombinationAllowed,
+  itemFormality,
+  scoreSwapCandidate,
+  swapReason,
+} from "@/lib/styleIntelligence";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -10,19 +18,32 @@ type SwapRequest = {
   profileId?: string;
   outfit: OutfitPlan;
   swapItemIds: string[];
+  manualReplacements?: Record<string, string>;
+  dayContext?: string;
+  calendarContext?: string;
+  vibe?: string;
+  weather?: string;
 };
 
-function available(item: WardrobeItem) {
-  return item.category !== "body_reference" && !["needs_wash", "drying", "unavailable"].includes(item.laundry_status || "clean");
+function average(items: WardrobeItem[], field: "formality_score" | "warmth_score", fallback: number) {
+  if (!items.length) return fallback;
+  return Math.max(1, Math.min(10, Math.round(items.reduce((sum, item) => sum + (item[field] ?? fallback), 0) / items.length)));
 }
 
-function scoreCandidate(candidate: WardrobeItem, currentIds: Set<string>) {
-  let score = 0;
-  if (!currentIds.has(candidate.id)) score += 10;
-  if ((candidate.laundry_status || "clean") === "clean") score += 4;
-  if ((candidate.formality_score ?? 5) >= 5) score += 1;
-  if ((candidate.warmth_score ?? 4) >= 4) score += 1;
-  return score;
+function rankCandidates(source: WardrobeItem, currentOutfit: WardrobeItem[], allItems: WardrobeItem[], body: SwapRequest) {
+  const context = inferStyleContext({
+    dayContext: [body.calendarContext, body.dayContext].filter(Boolean).join("\n"),
+    weather: body.weather,
+    vibe: body.vibe,
+  });
+  const currentIds = new Set(currentOutfit.map((item) => item.id));
+  return allItems
+    .filter(isAvailableClothing)
+    .filter((item) => item.id !== source.id)
+    .filter((item) => item.category === source.category)
+    .filter((item) => !currentIds.has(item.id))
+    .map((item) => ({ item, score: scoreSwapCandidate(item, currentOutfit, source, context) }))
+    .sort((a, b) => b.score - a.score);
 }
 
 export async function POST(request: NextRequest) {
@@ -44,41 +65,61 @@ export async function POST(request: NextRequest) {
 
     const items = (data ?? []) as WardrobeItem[];
     const byId = new Map(items.map((item) => [item.id, item]));
-    const currentIds = new Set(body.outfit.item_ids);
-    const swapIds = new Set(body.swapItemIds);
-    const nextIds = [...body.outfit.item_ids];
+    const originalOutfit = body.outfit.item_ids.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
+    const context = inferStyleContext({
+      dayContext: [body.calendarContext, body.dayContext].filter(Boolean).join("\n"),
+      weather: body.weather,
+      vibe: body.vibe,
+    });
+
+    let currentIds = [...body.outfit.item_ids];
     const replaced: string[] = [];
+    const reasoning: string[] = [];
 
-    for (const id of body.swapItemIds) {
-      const currentItem = byId.get(id);
-      if (!currentItem) continue;
-      const candidates = items
-        .filter(available)
-        .filter((item) => item.category === currentItem.category)
-        .filter((item) => !currentIds.has(item.id) && !swapIds.has(item.id))
-        .sort((a, b) => scoreCandidate(b, currentIds) - scoreCandidate(a, currentIds));
+    for (const sourceId of body.swapItemIds) {
+      const source = byId.get(sourceId);
+      if (!source) continue;
 
-      const replacement = candidates[0];
-      const index = nextIds.indexOf(id);
-      if (replacement && index >= 0) {
-        nextIds[index] = replacement.id;
-        currentIds.delete(id);
-        currentIds.add(replacement.id);
-        replaced.push(`${currentItem.name} → ${replacement.name}`);
+      const manualId = body.manualReplacements?.[sourceId];
+      const currentOutfit = currentIds.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
+      let chosen: WardrobeItem | undefined;
+
+      if (manualId) {
+        const manual = byId.get(manualId);
+        if (manual && isAvailableClothing(manual) && manual.category === source.category && !currentIds.includes(manual.id)) chosen = manual;
       }
+
+      if (!chosen) {
+        const candidates = rankCandidates(source, currentOutfit, items, body);
+        chosen = candidates.find((candidate) => {
+          const trial = currentOutfit.map((item) => (item.id === source.id ? candidate.item : item));
+          return candidate.score > -20 && isCombinationAllowed(trial, context);
+        })?.item;
+      }
+
+      if (!chosen) continue;
+      currentIds = currentIds.map((id) => (id === sourceId ? chosen!.id : id));
+      replaced.push(`${source.name} → ${chosen.name}`);
+      reasoning.push(swapReason(chosen, source, context));
     }
 
+    const selected = currentIds.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
+    const incompatible = !isCombinationAllowed(selected, context);
     const newOutfit: OutfitPlan = {
       ...body.outfit,
-      item_ids: [...new Set(nextIds)].slice(0, 7),
-      summary: byId.size ? [...new Set(nextIds)].map((id) => byId.get(id)?.name).filter(Boolean).join(" + ") : body.outfit.summary,
+      item_ids: currentIds,
+      summary: selected.map((item) => item.name).join(" + ") || body.outfit.summary,
       why_it_works: replaced.length
-        ? `Swapped ${replaced.join(", ")}. Review the updated outfit, then regenerate once.`
-        : "No suitable same-category replacements were found. Try selecting a different item to swap.",
-      watch_outs: replaced.length ? [] : ["No replacement available for one or more selected items."],
+        ? `Changed ${replaced.join(", ")}. ${Array.from(new Set(reasoning)).slice(0, 2).join(" ")}`
+        : "No suitable same-category replacements were found. Open the replacement picker and choose one manually.",
+      watch_outs: incompatible
+        ? ["This manual swap may clash in formality/style. Consider another replacement before generating the try-on."]
+        : replaced.length ? [] : ["No replacement available for one or more selected items."],
+      formality_score: Math.min(context.formalityCeiling, Math.round(selected.reduce((sum, item) => sum + itemFormality(item), 0) / Math.max(selected.length, 1)) || average(selected, "formality_score", 5)),
+      warmth_score: average(selected, "warmth_score", 4),
     };
 
-    return NextResponse.json({ ok: true, outfit: newOutfit, replaced });
+    return NextResponse.json({ ok: true, outfit: newOutfit, replaced, incompatible });
   } catch (error) {
     console.error("/api/swap-outfit failed", error);
     return NextResponse.json(

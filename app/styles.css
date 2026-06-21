@@ -846,3 +846,199 @@ input::placeholder, textarea::placeholder { color: #6b7280 !important; opacity: 
   .visual-picker-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .selected-outfit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
 }
+
+/* HOTFIX V7 FASHION CONCIERGE UX START */
+:root {
+  --ux-ink: #171412;
+  --ux-muted: #645c55;
+  --ux-card: rgba(255, 255, 255, .96);
+  --ux-line: rgba(23, 20, 18, .12);
+  --ux-shadow: 0 18px 44px rgba(23, 20, 18, .10);
+}
+body {
+  background: linear-gradient(180deg, #fbfaf7 0%, #f1eee8 100%);
+  color: var(--ux-ink);
+}
+.app-shell-header,
+.app-shell-header * {
+  color: var(--ux-ink);
+}
+.app-shell-header select,
+.app-shell-header option,
+.profile-switcher select,
+.profile-selector select,
+select {
+  color: var(--ux-ink) !important;
+  background-color: rgba(255,255,255,.92) !important;
+  -webkit-text-fill-color: var(--ux-ink) !important;
+}
+.app-shell-header {
+  padding-top: max(.9rem, env(safe-area-inset-top));
+  background: rgba(251, 250, 247, .92);
+}
+.ux-control-strip {
+  align-items: stretch;
+}
+.switch-row {
+  min-width: 156px;
+  flex: 1 1 156px;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+.switch-row span {
+  white-space: normal;
+  line-height: 1.1;
+}
+.calendar-context-card {
+  grid-template-columns: auto 1fr;
+}
+.calendar-context-card .calendar-connect-row {
+  grid-column: 2;
+  display: flex;
+  gap: .45rem;
+  flex-wrap: wrap;
+  margin-top: .35rem;
+}
+.calendar-connect-row a {
+  color: var(--ux-ink);
+  background: rgba(255,255,255,.82);
+  border: 1px solid rgba(23,20,18,.12);
+  border-radius: 999px;
+  padding: .38rem .62rem;
+  font-size: .78rem;
+  font-weight: 900;
+  text-decoration: none;
+}
+.swap-helper {
+  border-radius: 18px;
+  padding: .72rem .85rem;
+  background: rgba(255, 244, 220, .84);
+  color: #5d4221;
+  font-weight: 750;
+}
+.swap-picker-stack {
+  display: grid;
+  gap: .85rem;
+  margin: 1rem 0;
+}
+.swap-picker-panel {
+  border-radius: 24px;
+  border: 1px solid rgba(23,20,18,.10);
+  background: rgba(255,255,255,.78);
+  padding: .85rem;
+}
+.swap-picker-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: .75rem;
+  margin-bottom: .7rem;
+}
+.swap-picker-heading strong,
+.swap-picker-heading small {
+  display: block;
+}
+.swap-picker-heading small {
+  color: var(--ux-muted);
+  line-height: 1.35;
+}
+.compact-action {
+  padding: .55rem .75rem !important;
+  font-size: .86rem;
+  white-space: nowrap;
+}
+.swap-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: .6rem;
+}
+.swap-candidate-card {
+  text-align: left;
+  border-radius: 18px;
+  border: 2px solid transparent;
+  background: rgba(248, 246, 242, .92);
+  color: var(--ux-ink);
+  padding: .48rem;
+  display: grid;
+  gap: .35rem;
+  cursor: pointer;
+}
+.swap-candidate-card.selected {
+  border-color: #171412;
+  background: #fff7e8;
+}
+.swap-candidate-card.soft-warning {
+  opacity: .72;
+}
+.swap-candidate-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 14px;
+  background: #e8e4dd;
+}
+.swap-candidate-card strong {
+  font-size: .84rem;
+  line-height: 1.15;
+}
+.swap-candidate-card small {
+  color: var(--ux-muted);
+  font-size: .72rem;
+  line-height: 1.2;
+}
+@media (max-width: 760px) {
+  .app-shell-header {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: .75rem;
+  }
+  .brand-lockup { min-width: 0; }
+  .top-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .top-nav a {
+    text-align: center;
+    padding: .72rem .5rem;
+  }
+  .page-shell.ux-page {
+    width: min(100% - 1rem, 1180px);
+  }
+  .ux-hero,
+  .stylist-command-grid,
+  .two-look-grid,
+  .compact-input-grid,
+  .auto-context-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .ux-hero h1 {
+    font-size: clamp(2.1rem, 11vw, 3.2rem);
+  }
+  .ux-control-strip {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .date-pill-row {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: .2rem;
+  }
+  .switch-row {
+    width: 100%;
+    min-width: 0;
+  }
+  .look-card-media {
+    min-height: 250px;
+  }
+  .outfit-collage {
+    height: 220px;
+  }
+  .swap-picker-heading {
+    display: grid;
+  }
+  .swap-candidate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* HOTFIX V7 FASHION CONCIERGE UX END */

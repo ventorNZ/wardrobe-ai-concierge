@@ -23,6 +23,16 @@ type Recommendation = {
   missing_info: string[];
 };
 
+type SwapCandidate = {
+  id: string;
+  name: string;
+  category: string;
+  image_url?: string;
+  score: number;
+  compatible: boolean;
+  reason: string;
+};
+
 const WEATHER_PREF_KEY = "wardrobeAI:useLiveWeather";
 const CALENDAR_PREF_KEY = "wardrobeAI:useCalendarContext";
 const AUTOGEN_PREF_KEY = "wardrobeAI:autoMorningLooks";
@@ -38,6 +48,23 @@ function cleanSavedVibe(value?: string | null) {
   const lower = text.toLowerCase();
   if (LEGACY_FORCED_VIBES.some((forced) => lower.includes(forced))) return "";
   return text;
+}
+
+const CASUAL_BRIEF_WORDS = /sunday|saturday|weekend|family|kids|children|home|errands|school run|casual|relaxed|park|brunch|lunch|afternoon|bbq|coffee|shopping|movies|walk/i;
+const EXPLICIT_FORMAL_WORDS = /formal|client|presentation|board|meeting|exec|office|interview|founder|camera|work|wedding|gala|suit|tie required/i;
+
+function isCasualBrief(dayContext?: string | null, vibe?: string | null) {
+  const day = dayContext || "";
+  const style = cleanSavedVibe(vibe || "");
+  if (EXPLICIT_FORMAL_WORDS.test(`${day} ${style}`) && !CASUAL_BRIEF_WORDS.test(day)) return false;
+  return CASUAL_BRIEF_WORDS.test(`${day} ${style}`);
+}
+
+function savedRecommendationIsTooFormal(recommendation: Recommendation, dayContext?: string | null, vibe?: string | null) {
+  if (!isCasualBrief(dayContext, vibe)) return false;
+  const outfits = recommendation.outfits || [];
+  if (!outfits.length) return false;
+  return outfits.some((outfit) => (outfit.formality_score ?? 5) > 5);
 }
 
 function selectedKey(profileId: string, dateIso: string) {
@@ -124,6 +151,9 @@ export default function PlannerPage() {
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [swapSelections, setSwapSelections] = useState<Record<string, string[]>>({});
   const [swapModes, setSwapModes] = useState<Record<string, boolean>>({});
+  const [swapCandidateMap, setSwapCandidateMap] = useState<Record<string, Record<string, SwapCandidate[]>>>({});
+  const [manualSwapChoices, setManualSwapChoices] = useState<Record<string, Record<string, string>>>({});
+  const [swapLoadingKey, setSwapLoadingKey] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const lastHydration = useRef("");
 
@@ -234,12 +264,17 @@ export default function PlannerPage() {
       if (lastHydration.current !== hydrationKey) return;
       const session = (data as StylistSession | null) || local;
       if (session?.id) setSessionId(session.id);
-      setDayContext(session?.day_context || local.day_context || "");
+      const savedDayContext = session?.day_context || local.day_context || "";
+      const savedVibe = cleanSavedVibe(session?.desired_vibe || local.desired_vibe || "");
+      setDayContext(savedDayContext);
       if (session?.weather_summary || local.weather_summary) setWeather(session?.weather_summary || local.weather_summary || "");
-      setVibe(cleanSavedVibe(session?.desired_vibe || local.desired_vibe || ""));
+      setVibe(savedVibe);
       if (session?.active_body_item_id || local.active_body_item_id) setBodyId(session.active_body_item_id || local.active_body_item_id || "");
       const savedRecommendation = (session?.last_recommendation || local.last_recommendation) as Recommendation | undefined;
-      if (savedRecommendation?.outfits?.length) setResult({ ...savedRecommendation, outfits: savedRecommendation.outfits.slice(0, 2) });
+      if (savedRecommendation?.outfits?.length) {
+        const cleaned = { ...savedRecommendation, outfits: savedRecommendation.outfits.slice(0, 2) };
+        setResult(savedRecommendationIsTooFormal(cleaned, savedDayContext, savedVibe) ? null : cleaned);
+      }
       setHydrated(true);
     }
     void hydrate();
@@ -399,6 +434,58 @@ export default function PlannerPage() {
     });
   }
 
+  async function loadSwapCandidates(outfit: OutfitPlan, lookLabel: string, sourceItemId: string) {
+    if (swapCandidateMap[lookLabel]?.[sourceItemId]?.length) return;
+    setSwapLoadingKey(`${lookLabel}:${sourceItemId}`);
+    try {
+      const response = await fetch("/api/swap-candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profileId: activeProfileId,
+          outfit,
+          sourceItemId,
+          dayContext: combinedContext(),
+          calendarContext,
+          weather: useLiveWeather ? weather : "Weather ignored by preference",
+          vibe: cleanSavedVibe(vibe),
+        }),
+      });
+      const payload = await readJson(response);
+      if (!response.ok) throw new Error(payload.error || "Could not load replacements");
+      setSwapCandidateMap((current) => ({
+        ...current,
+        [lookLabel]: {
+          ...(current[lookLabel] ?? {}),
+          [sourceItemId]: payload.candidates ?? [],
+        },
+      }));
+      if (payload.suggestedId) {
+        setManualSwapChoices((current) => ({
+          ...current,
+          [lookLabel]: {
+            ...(current[lookLabel] ?? {}),
+            [sourceItemId]: current[lookLabel]?.[sourceItemId] || payload.suggestedId,
+          },
+        }));
+      }
+    } catch (err) {
+      setCardErrors((current) => ({ ...current, [lookLabel]: err instanceof Error ? err.message : "Could not load replacements" }));
+    } finally {
+      setSwapLoadingKey("");
+    }
+  }
+
+  function chooseSwapCandidate(lookLabel: string, sourceItemId: string, candidateId: string) {
+    setManualSwapChoices((current) => ({
+      ...current,
+      [lookLabel]: {
+        ...(current[lookLabel] ?? {}),
+        [sourceItemId]: candidateId,
+      },
+    }));
+  }
+
   async function swapSelected(outfit: OutfitPlan, lookLabel: string) {
     const swapItemIds = swapSelections[lookLabel] ?? [];
     if (!swapItemIds.length) return outfit;
@@ -406,7 +493,16 @@ export default function PlannerPage() {
     const response = await fetch("/api/swap-outfit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profileId: activeProfileId, outfit, swapItemIds }),
+      body: JSON.stringify({
+        profileId: activeProfileId,
+        outfit,
+        swapItemIds,
+        manualReplacements: manualSwapChoices[lookLabel] ?? {},
+        dayContext: combinedContext(),
+        calendarContext,
+        weather: useLiveWeather ? weather : "Weather ignored by preference",
+        vibe: cleanSavedVibe(vibe),
+      }),
     });
     const payload = await readJson(response);
     if (!response.ok) throw new Error(payload.error || "Swap failed");
@@ -416,6 +512,7 @@ export default function PlannerPage() {
       outfits: current.outfits.map((entry, index) => (String.fromCharCode(65 + index) === lookLabel ? updated : entry)),
     } : current);
     setSwapSelections((current) => ({ ...current, [lookLabel]: [] }));
+    setManualSwapChoices((current) => ({ ...current, [lookLabel]: {} }));
     setPreviews((current) => {
       const copy = { ...current };
       delete copy[lookLabel];
@@ -424,11 +521,10 @@ export default function PlannerPage() {
     return updated;
   }
 
-  async function swapAndGenerate(outfit: OutfitPlan, lookLabel: string) {
+  async function applySwapsOnly(outfit: OutfitPlan, lookLabel: string) {
     setPreviewLoading(lookLabel);
     try {
-      const updated = await swapSelected(outfit, lookLabel);
-      await generateLook(updated, lookLabel);
+      await swapSelected(outfit, lookLabel);
       setSwapModes((current) => ({ ...current, [lookLabel]: false }));
     } catch (err) {
       setCardErrors((current) => ({ ...current, [lookLabel]: err instanceof Error ? err.message : "Swap failed" }));
@@ -484,7 +580,7 @@ export default function PlannerPage() {
             <textarea
               value={dayContext}
               onChange={(event) => setDayContext(event.target.value)}
-              placeholder="Optional. Example: Sunday afternoon family time, school run, dinner out, client meeting."
+              placeholder="Optional. Example: Sunday afternoon family time, online staff meetings, dinner out, school run."
               rows={4}
             />
           </label>
@@ -498,13 +594,24 @@ export default function PlannerPage() {
             </label>
             <label>
               <span>Style preference (optional)</span>
-              <input value={vibe} onChange={(event) => setVibe(event.target.value)} placeholder="Leave blank unless you want a specific style." />
+              <input value={vibe} onChange={(event) => setVibe(event.target.value)} placeholder="Leave blank unless you want to override. Example: relaxed, creative casual, smart but not corporate." />
             </label>
           </div>
+          {isCasualBrief(dayContext, vibe) ? <p className="notice">Casual/family mode detected — formal pieces are deprioritised unless you ask for them.</p> : null}
 
           <div className="auto-context-grid">
             <div className="context-chip-card"><span>☁️</span><strong>{weatherLoading ? "Weather loading…" : "Weather"}</strong><small>{weather || "Automatic Auckland/NZ fallback"}</small></div>
-            <div className="context-chip-card"><span>📅</span><strong>{calendarLoading ? "Calendar loading…" : "Calendar"}</strong><small>{calendarContext || "Hook ready; no connected calendar yet"}</small></div>
+            <div className="context-chip-card calendar-context-card">
+              <span>📅</span>
+              <strong>{calendarLoading ? "Calendar loading…" : "Calendar"}</strong>
+              <small>{calendarContext || "Connect Google or Outlook so the stylist can read online vs in-person plans."}</small>
+              {activeProfileId ? (
+                <div className="calendar-connect-row">
+                  <a href={`/api/calendar/connect?provider=google&profileId=${activeProfileId}`}>Google</a>
+                  <a href={`/api/calendar/connect?provider=outlook&profileId=${activeProfileId}`}>Outlook</a>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           <button type="button" className="primary-button wide-action" onClick={recommend} disabled={loading || availableItems.length < 2 || !activeProfileId}>
@@ -564,27 +671,68 @@ export default function PlannerPage() {
                       <span className="small-chip">warmth {outfit.warmth_score}/10</span>
                     </div>
                     <p>{outfit.why_it_works}</p>
-                    {isSwapMode ? <p className="swap-helper">Select every item you want changed. Nothing regenerates until you confirm.</p> : null}
+                    {isSwapMode ? <p className="swap-helper">Select every item you want changed. Pick the replacement yourself, or let AI choose the best same-category option. Nothing generates until you tap preview.</p> : null}
                     <div className={isSwapMode ? "swap-thumb-grid swap-active" : "swap-thumb-grid"}>
                       {outfitItems.map((item) => (
                         <button
                           key={item.id}
                           type="button"
                           className={["swap-thumb", selectedForSwap.has(item.id) ? "selected" : "", !isSwapMode ? "read-only" : ""].filter(Boolean).join(" ")}
-                          onClick={() => { if (isSwapMode) toggleSwap(lookLabel, item.id); }}
+                          onClick={() => {
+                            if (!isSwapMode) return;
+                            toggleSwap(lookLabel, item.id);
+                            void loadSwapCandidates(outfit, lookLabel, item.id);
+                          }}
                           aria-pressed={selectedForSwap.has(item.id)}
                         >
                           <img src={item.image_url} alt={item.name} />
-                          <span>{selectedForSwap.has(item.id) ? "Will swap" : item.category}</span>
+                          <span>{selectedForSwap.has(item.id) ? "Choose replacement" : item.category}</span>
                         </button>
                       ))}
                     </div>
+                    {isSwapMode ? (
+                      <div className="swap-picker-stack">
+                        {(swapSelections[lookLabel] ?? []).map((sourceId) => {
+                          const source = byId.get(sourceId);
+                          const candidates = swapCandidateMap[lookLabel]?.[sourceId] ?? [];
+                          const chosenId = manualSwapChoices[lookLabel]?.[sourceId] || candidates[0]?.id || "";
+                          return (
+                            <div className="swap-picker-panel" key={sourceId}>
+                              <div className="swap-picker-heading">
+                                <div>
+                                  <strong>Replace {source?.name || "item"}</strong>
+                                  <small>Same category, ranked for today’s context — not random.</small>
+                                </div>
+                                <button type="button" className="secondary-button compact-action" onClick={() => candidates[0]?.id && chooseSwapCandidate(lookLabel, sourceId, candidates[0].id)}>
+                                  Let AI choose
+                                </button>
+                              </div>
+                              {swapLoadingKey === `${lookLabel}:${sourceId}` && !candidates.length ? <p className="notice">Loading sensible replacements…</p> : null}
+                              <div className="swap-candidate-grid">
+                                {candidates.map((candidate) => (
+                                  <button
+                                    key={candidate.id}
+                                    type="button"
+                                    className={["swap-candidate-card", chosenId === candidate.id ? "selected" : "", !candidate.compatible ? "soft-warning" : ""].filter(Boolean).join(" ")}
+                                    onClick={() => chooseSwapCandidate(lookLabel, sourceId, candidate.id)}
+                                  >
+                                    {candidate.image_url ? <img src={candidate.image_url} alt={candidate.name} /> : null}
+                                    <strong>{candidate.name}</strong>
+                                    <small>{candidate.reason}</small>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                     {cardErrors[lookLabel] ? <p className="error compact-error">{cardErrors[lookLabel]}</p> : null}
                     <div className="button-row wrap-buttons">
                       {isSwapMode ? (
                         <>
-                          <button type="button" className="primary-button" onClick={() => swapAndGenerate(outfit, lookLabel)} disabled={previewLoading === lookLabel || !hasSwaps}>
-                            {previewLoading === lookLabel ? "Regenerating…" : hasSwaps ? "Regenerate selected items" : "Select items first"}
+                          <button type="button" className="primary-button" onClick={() => applySwapsOnly(outfit, lookLabel)} disabled={previewLoading === lookLabel || !hasSwaps}>
+                            {previewLoading === lookLabel ? "Applying…" : hasSwaps ? "Apply selected swaps" : "Select items first"}
                           </button>
                           <button type="button" className="secondary-button" onClick={() => {
                             setSwapSelections((current) => ({ ...current, [lookLabel]: [] }));
@@ -611,7 +759,7 @@ export default function PlannerPage() {
         <section className="card empty-state-card soft-empty visual-empty">
           <span className="eyebrow dark">Morning concierge</span>
           <h2>Two looks, no wardrobe dump.</h2>
-          <p>Create today’s two looks once. To change a look, select all items you want swapped first, then regenerate once.</p>
+          <p>Create today’s two looks once. To change a look, tap Change items, pick replacements from your closet, then generate the preview only when you are ready.</p>
         </section>
       )}
     </div>

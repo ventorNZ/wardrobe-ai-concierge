@@ -2,6 +2,16 @@ import OpenAI from "openai";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import { nzTodayIso } from "@/lib/nzTime";
 import type { WardrobeItem } from "@/lib/types";
+import {
+  inferStyleContext,
+  isAvailableClothing,
+  isCombinationAllowed,
+  itemFormality,
+  rankItemsForContext,
+  stylistModeInstruction,
+  stripLegacyFormalVibe,
+  type StyleContext,
+} from "@/lib/styleIntelligence";
 
 export type OutfitPlan = {
   label: string;
@@ -91,6 +101,7 @@ function compactItem(item: WardrobeItem) {
     season_tags: item.season_tags,
     formality: item.formality,
     formality_score: item.formality_score,
+    inferred_formality_score: itemFormality(item),
     warmth_score: item.warmth_score,
     weather_suitability: item.weather_suitability,
     style_tags: item.style_tags,
@@ -101,62 +112,83 @@ function compactItem(item: WardrobeItem) {
   };
 }
 
-
-function inferStyleIntent(input: RecommendInput) {
-  const text = `${input.dayContext || ""} ${input.vibe || ""}`.toLowerCase();
-  if (input.vibe?.trim()) return input.vibe.trim();
-  if (/sunday|saturday|weekend|family|kids|home|errands|school run|casual|relaxed|park|brunch|lunch|afternoon/.test(text)) {
-    return "Relaxed casual, comfortable, family-appropriate and weather-aware. Do not make it formal unless the user explicitly asks.";
-  }
-  if (/client|presentation|board|meeting|exec|office|interview|founder|camera|work/.test(text)) {
-    return "Smart but not stiff; polished only because the context is work-related.";
-  }
-  if (/dinner|date|restaurant|event|party/.test(text)) {
-    return "Elevated casual; intentional but not corporate.";
-  }
-  return "Natural, practical and context-led. Do not default to formal, client-ready or camera-ready.";
-}
-
 function average(items: WardrobeItem[], field: "formality_score" | "warmth_score", fallback: number) {
   if (!items.length) return fallback;
   return Math.max(1, Math.min(10, Math.round(items.reduce((sum, item) => sum + (item[field] ?? fallback), 0) / items.length)));
 }
 
-function buildLook(label: string, items: WardrobeItem[]): OutfitPlan {
+function buildLook(label: string, items: WardrobeItem[], context: StyleContext): OutfitPlan {
+  const selected = items.filter(Boolean);
+  const formality = selected.length ? Math.round(selected.reduce((sum, item) => sum + itemFormality(item), 0) / selected.length) : context.formalityCeiling;
   return {
     label,
-    item_ids: items.map((item) => item.id),
-    summary: items.map((item) => item.name).join(" + ") || "Upload more wardrobe pieces",
-    why_it_works: "This look uses only available wardrobe items and avoids anything marked needs wash, drying or unavailable.",
-    watch_outs: [],
-    formality_score: average(items, "formality_score", 5),
-    warmth_score: average(items, "warmth_score", 4),
+    item_ids: selected.map((item) => item.id),
+    summary: selected.map((item) => item.name).join(" + ") || "Upload more wardrobe pieces",
+    why_it_works: context.reason,
+    watch_outs: isCombinationAllowed(selected, context) ? [] : ["This combination was adjusted because some pieces clashed in formality or style."],
+    formality_score: Math.min(context.formalityCeiling, formality),
+    warmth_score: average(selected, "warmth_score", 4),
   };
 }
 
-export function fallbackRecommendation(items: WardrobeItem[], input: RecommendInput): Recommendation {
-  const available = items.filter((item) => item.category !== "body_reference" && !["needs_wash", "drying", "unavailable"].includes(item.laundry_status || "clean"));
-  const byCategory = (category: WardrobeItem["category"]) => available.filter((item) => item.category === category);
-  const tops = byCategory("top");
-  const bottoms = byCategory("bottom");
-  const shoes = byCategory("shoes");
-  const outerwear = byCategory("outerwear");
-  const accessories = byCategory("accessory");
-  const make = (label: string, offset: number) => [
-    tops[offset % Math.max(tops.length, 1)],
-    bottoms[offset % Math.max(bottoms.length, 1)],
-    shoes[offset % Math.max(shoes.length, 1)],
-    outerwear[offset % Math.max(outerwear.length, 1)],
-    accessories[offset % Math.max(accessories.length, 1)],
-  ].filter(Boolean) as WardrobeItem[];
+function category(items: WardrobeItem[], name: WardrobeItem["category"]) {
+  return items.filter((item) => item.category === name);
+}
 
-  const outfits = [buildLook("Look A", make("Look A", 0)), buildLook("Look B", make("Look B", 1))]
-    .filter((look) => look.item_ids.length >= 2)
-    .slice(0, 2);
+function findOutfitCombinations(ranked: WardrobeItem[], context: StyleContext) {
+  const tops = category(ranked, "top").slice(0, 10);
+  const bottoms = category(ranked, "bottom").slice(0, 10);
+  const shoes = category(ranked, "shoes").slice(0, 10);
+  const outerwear = category(ranked, "outerwear").slice(0, 8);
+  const accessories = category(ranked, "accessory").slice(0, 8);
+  const looks: WardrobeItem[][] = [];
+
+  const topPool = tops.length ? tops : ranked.slice(0, 6);
+  const bottomPool = bottoms.length ? bottoms : ranked.filter((item) => item.category !== "top").slice(0, 6);
+  const shoePool = shoes.length ? shoes : [];
+  const outerPool = [undefined, ...outerwear] as Array<WardrobeItem | undefined>;
+  const accessoryPool = [undefined, ...accessories] as Array<WardrobeItem | undefined>;
+
+  for (const top of topPool) {
+    for (const bottom of bottomPool) {
+      for (const shoe of shoePool.length ? shoePool : [undefined]) {
+        for (const outer of outerPool) {
+          for (const accessory of accessoryPool) {
+            const outfit = [top, bottom, shoe, outer, accessory].filter(Boolean) as WardrobeItem[];
+            const ids = new Set(outfit.map((item) => item.id));
+            if (ids.size !== outfit.length) continue;
+            if (outfit.length < 2) continue;
+            if (!isCombinationAllowed(outfit, context)) continue;
+            const avgFormality = outfit.reduce((sum, item) => sum + itemFormality(item), 0) / outfit.length;
+            if (avgFormality > context.formalityCeiling + 0.35) continue;
+            looks.push(outfit);
+            if (looks.length >= 2) return looks;
+          }
+        }
+      }
+    }
+  }
+
+  return looks.length ? looks : [ranked.slice(0, Math.min(5, ranked.length))];
+}
+
+export function fallbackRecommendation(items: WardrobeItem[], input: RecommendInput): Recommendation {
+  const context = inferStyleContext({ dayContext: input.dayContext, weather: input.weather, vibe: input.vibe });
+  const ranked = rankItemsForContext(items, context);
+  const combos = findOutfitCombinations(ranked, context);
+  const outfits = combos.map((combo, index) => buildLook(index === 0 ? "Look A" : "Look B", combo, context)).slice(0, 2);
+
+  while (outfits.length < 2 && ranked.length >= 2) {
+    const offset = outfits.length;
+    const used = new Set(outfits.flatMap((look) => look.item_ids));
+    const next = ranked.filter((item) => !used.has(item.id)).slice(0, 5);
+    if (next.length < 2) break;
+    outfits.push(buildLook(offset === 0 ? "Look A" : "Look B", next, context));
+  }
 
   return {
     day_brief: [input.dayContext, input.weather].filter(Boolean).join(" · ") || "Today’s practical wardrobe brief.",
-    stylist_positioning: "Two quick outfit options for the actual day context.",
+    stylist_positioning: `${context.label}: ${context.reason} Formality target ${context.formalityCeiling}/10 or lower unless you explicitly ask otherwise.`,
     missing_info: outfits.length < 2 ? ["Upload more complete wardrobe pieces to improve the recommendations."] : [],
     outfits,
   };
@@ -175,6 +207,18 @@ export function keepOnlyValidIds(recommendation: Recommendation, usable: Wardrob
       }))
       .filter((outfit) => outfit.item_ids.length >= 2),
   };
+}
+
+function recommendationBreaksContext(recommendation: Recommendation, usable: WardrobeItem[], context: StyleContext) {
+  const byId = new Map(usable.map((item) => [item.id, item]));
+  return recommendation.outfits.some((outfit) => {
+    const selected = outfit.item_ids.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
+    if (!selected.length) return true;
+    const avgFormality = selected.reduce((sum, item) => sum + itemFormality(item), 0) / selected.length;
+    if (avgFormality > context.formalityCeiling + 0.35) return true;
+    if ((outfit.formality_score ?? 5) > context.formalityCeiling) return true;
+    return !isCombinationAllowed(selected, context);
+  });
 }
 
 export async function recommendOutfits(input: RecommendInput) {
@@ -204,36 +248,51 @@ export async function recommendOutfits(input: RecommendInput) {
   if (error) throw error;
 
   const items = (data ?? []) as WardrobeItem[];
-  const usable = items.filter((item) => item.category !== "body_reference" && !["needs_wash", "drying", "unavailable"].includes(item.laundry_status || "clean"));
+  const usable = items.filter(isAvailableClothing);
+  const context = inferStyleContext({ dayContext: input.dayContext, weather: input.weather, vibe: input.vibe });
 
   let recommendation: Recommendation;
   if (usable.length < 2) {
     recommendation = fallbackRecommendation(items, input);
   } else {
-    const styleIntent = inferStyleIntent(input);
-    const prompt = `You are Wardrobe Concierge's senior personal stylist. Be visual, direct and practical. Do not force formal styling.
+    const ranked = rankItemsForContext(usable, context);
+    const modelItems = ranked.slice(0, 70);
+    const cleanedVibe = stripLegacyFormalVibe(input.vibe, input.dayContext);
+    const profileGuidance = context.mode === "formal"
+      ? profileStyle
+      : "Use the profile for colour, fit and personality only. The occasion/calendar/weather wins over any saved corporate or executive wording.";
+    const prompt = `You are Wardrobe Concierge's senior personal stylist and fashion editor. Be visual, practical and tasteful, not corporate by default.
 
 Dress ${profileName} using ONLY item IDs from the wardrobe JSON. Return exactly 2 looks: Look A and Look B.
 
-Profile style: ${profileStyle}
+CONTEXT CLASSIFICATION: ${context.label.toUpperCase()}
+WHY: ${context.reason}
+FORMALITY CEILING: ${context.formalityCeiling}/10 unless the user explicitly asks for formal dress code.
+ALLOW FULL SUIT: ${context.allowSuit ? "yes" : "no"}
+CAMERA AWARE: ${context.cameraAware ? "yes" : "no"}
+Styling instruction: ${stylistModeInstruction(context)}
+Profile guidance: ${profileGuidance}
 Date: ${input.selectedDate || nzTodayIso()}
 Day/calendar context: ${input.dayContext || "No calendar context supplied."}
 Weather context: ${input.weather || "No weather context supplied."}
-Style intent: ${styleIntent}
+Explicit style preference: ${cleanedVibe || "none"}
 
-Rules:
-- Do not invent clothing.
-- Use only available item IDs.
+Non-negotiable rules:
+- The user's actual day and calendar beat saved profile style.
+- Online meetings do NOT mean full suit. Dress camera-smart but comfortable.
+- Never pair a Burton/sport/gym/logo hoodie or sweatshirt with pinstripe suit pieces, formal suit trousers, or a formal suit jacket.
+- Do not create novelty clashing combinations. Be creative through texture, colour, layers and proportion, not random mixing.
+- Use only available item IDs from the JSON.
 - Do not choose body_reference items.
 - Do not choose needs_wash, drying or unavailable items.
 - Prefer complete outfits: top + bottom + shoes, with outerwear/accessory when useful.
 - Treat multiple photo angles as one item, not duplicates.
 - Keep text short; the UI is visual.
-- If the context says family, Sunday, weekend, errands or casual time, keep formality low-to-medium and avoid corporate language.
-- Only use words like polished, client-ready or camera-friendly when the user context is actually work/client/on-camera.
+- If the context is online work, prefer smart knit/cardigan/quarter zip/polo/clean overshirt and avoid tie/full suit.
+- If the context is Sunday/weekend/family/errands, the look must be relaxed and family practical.
 
-Available wardrobe items JSON:
-${JSON.stringify(usable.map(compactItem), null, 2)}`;
+Available wardrobe items JSON, already ranked for context:
+${JSON.stringify(modelItems.map(compactItem), null, 2)}`;
 
     try {
       const response = await getOpenAI().responses.create({
@@ -249,7 +308,9 @@ ${JSON.stringify(usable.map(compactItem), null, 2)}`;
         },
       } as never);
       recommendation = keepOnlyValidIds(JSON.parse(getOutputText(response)), usable);
-      if (recommendation.outfits.length < 2) recommendation = fallbackRecommendation(items, input);
+      if (recommendation.outfits.length < 2 || recommendationBreaksContext(recommendation, usable, context)) {
+        recommendation = fallbackRecommendation(items, input);
+      }
     } catch (aiError) {
       console.error("AI recommendation failed; using fallback", aiError);
       recommendation = fallbackRecommendation(items, input);
@@ -268,7 +329,7 @@ export async function saveStylistSession(input: RecommendInput, recommendation: 
     selected_date: input.selectedDate || nzTodayIso(),
     day_context: input.dayContext || null,
     weather_summary: input.weather || null,
-    desired_vibe: input.vibe?.trim() || null,
+    desired_vibe: stripLegacyFormalVibe(input.vibe, input.dayContext) || null,
     active_body_item_id: input.bodyId || null,
     draft_prompt: input.dayContext || null,
     last_recommendation: recommendation,
