@@ -121,3 +121,4 @@ Wardrobe items:
 ## Important note
 
 This is a generative outfit preview, not a physics-accurate virtual fitting room. It is perfect for vibe, colour, silhouette, and styling direction. For exact sizing and garment physics, add segmentation and specialised virtual try-on models later.
+Deploy trigger: Manny/Yess profile fix
