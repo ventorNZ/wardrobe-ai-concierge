@@ -10,7 +10,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "smoke:routes": "node scripts/e2e-production-audit.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",

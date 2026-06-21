@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useProfiles } from "@/lib/useProfiles";
 import type { OutfitPreview, StylistSession, WardrobeItem } from "@/lib/types";
-import { addDaysToIsoDate, formatNzCalendarDate, nzNowLabel, nzTimeOnlyLabel, nzTodayIso, NZ_TIME_ZONE, weekdayFromIsoDate } from "@/lib/nzTime";
+import { addDaysToIsoDate, formatNzCalendarDate, nzNowLabel, nzTodayIso, NZ_TIME_ZONE, weekdayFromIsoDate } from "@/lib/nzTime";
 
 type OutfitPlan = {
   label: string;
@@ -23,128 +23,187 @@ type Recommendation = {
   missing_info: string[];
 };
 
-const weekdayOptions = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const WEATHER_PREF_KEY = "wardrobeAI:useLiveWeather";
+const CALENDAR_PREF_KEY = "wardrobeAI:useCalendarContext";
+const AUTOGEN_PREF_KEY = "wardrobeAI:autoMorningLooks";
 
-function todayIso() {
-  return nzTodayIso();
-}
-
-function dayFromDate(date: string) {
-  return weekdayFromIsoDate(date);
+function selectedKey(profileId: string, dateIso: string) {
+  return `wardrobeAI:dressMeSelection:${profileId || "demo"}:${dateIso}`;
 }
 
 function weatherCodeLabel(code: number) {
-  if ([0].includes(code)) return "clear";
-  if ([1, 2, 3].includes(code)) return "partly cloudy";
-  if ([45, 48].includes(code)) return "fog";
+  if ([0, 1].includes(code)) return "clear";
+  if ([2, 3].includes(code)) return "cloudy";
+  if ([45, 48].includes(code)) return "foggy";
   if ([51, 53, 55, 56, 57].includes(code)) return "drizzle";
-  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return "rain/showers";
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return "rain";
   if ([71, 73, 75, 77, 85, 86].includes(code)) return "snow";
-  if ([95, 96, 99].includes(code)) return "thunderstorms";
-  return "mixed weather";
+  if ([95, 96, 99].includes(code)) return "storm";
+  return "mixed";
 }
 
-function getSpeechRecognition() {
-  if (typeof window === "undefined") return null;
-  const w = window as unknown as {
-    SpeechRecognition?: new () => any;
-    webkitSpeechRecognition?: new () => any;
-  };
-  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
+async function readJson(response: Response) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return { error: text || `HTTP ${response.status}` };
+  }
+}
+
+async function fetchWeatherSummary(selectedDate: string) {
+  const fallback = { latitude: -36.8485, longitude: 174.7633, place: "Auckland" };
+  const position = await new Promise<typeof fallback>((resolve) => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) return resolve(fallback);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, place: "current location" }),
+      () => resolve(fallback),
+      { enableHighAccuracy: false, timeout: 3500, maximumAge: 1000 * 60 * 30 },
+    );
+  });
+
+  const url = new URL("https://api.open-meteo.com/v1/forecast");
+  url.searchParams.set("latitude", String(position.latitude));
+  url.searchParams.set("longitude", String(position.longitude));
+  url.searchParams.set("current", "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m");
+  url.searchParams.set("daily", "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code");
+  url.searchParams.set("timezone", NZ_TIME_ZONE);
+  url.searchParams.set("start_date", selectedDate);
+  url.searchParams.set("end_date", selectedDate);
+
+  const response = await fetch(url.toString());
+  if (!response.ok) throw new Error("Weather unavailable");
+  const data = await response.json();
+  const now = data.current ?? {};
+  const daily = data.daily ?? {};
+  const code = Number(now.weather_code ?? daily.weather_code?.[0] ?? 3);
+  const high = Math.round(Number(daily.temperature_2m_max?.[0] ?? now.temperature_2m ?? 0));
+  const low = Math.round(Number(daily.temperature_2m_min?.[0] ?? now.apparent_temperature ?? 0));
+  const temp = Math.round(Number(now.temperature_2m ?? high));
+  const feels = Math.round(Number(now.apparent_temperature ?? temp));
+  const rain = Math.round(Number(daily.precipitation_probability_max?.[0] ?? 0));
+  const wind = Math.round(Number(now.wind_speed_10m ?? 0));
+
+  return `${position.place}: ${temp}°C now, feels ${feels}°C · high ${high}° / low ${low}° · ${weatherCodeLabel(code)} · rain ${rain}% · wind ${wind} km/h`;
 }
 
 export default function PlannerPage() {
   const { activeProfile, activeProfileId, loadingProfiles, profileError } = useProfiles();
   const [items, setItems] = useState<WardrobeItem[]>([]);
   const [bodyId, setBodyId] = useState("");
-  const [selectedDate, setSelectedDate] = useState(todayIso());
-  const selectedDay = dayFromDate(selectedDate);
-  const [nzClockLabel, setNzClockLabel] = useState(nzNowLabel());
-  const todayRef = useRef(todayIso());
+  const [selectedDate, setSelectedDate] = useState(nzTodayIso());
+  const [nzClock, setNzClock] = useState(nzNowLabel());
   const [dayContext, setDayContext] = useState("");
   const [weather, setWeather] = useState("");
-  const [vibe, setVibe] = useState("");
-  const [sessionId, setSessionId] = useState("");
+  const [calendarContext, setCalendarContext] = useState("");
+  const [vibe, setVibe] = useState("Polished, modern, comfortable, camera-friendly.");
+  const [useLiveWeather, setUseLiveWeather] = useState(true);
+  const [useCalendar, setUseCalendar] = useState(true);
+  const [autoMorning, setAutoMorning] = useState(true);
   const [result, setResult] = useState<Recommendation | null>(null);
-  const [previewImages, setPreviewImages] = useState<Record<string, string>>({});
-  const [generatingLooks, setGeneratingLooks] = useState<Record<string, boolean>>({});
+  const [sessionId, setSessionId] = useState("");
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
-  const [error, setError] = useState("");
   const [weatherLoading, setWeatherLoading] = useState(false);
-  const [locationStatus, setLocationStatus] = useState("");
-  const [speechActive, setSpeechActive] = useState(false);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [cardErrors, setCardErrors] = useState<Record<string, string>>({});
+  const [previewLoading, setPreviewLoading] = useState("");
+  const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [swapSelections, setSwapSelections] = useState<Record<string, string[]>>({});
+  const [hydrated, setHydrated] = useState(false);
+  const lastHydration = useRef("");
+
   const hydrationKey = `${activeProfileId}:${selectedDate}`;
-  const activeHydrationKeyRef = useRef("");
 
-  const byId = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
-  const bodyRefs = useMemo(() => items.filter((item) => item.category === "body_reference"), [items]);
-  const bodyRef = bodyRefs.find((item) => item.id === bodyId) || bodyRefs[0] || null;
-
-  const wardrobeState = useMemo(() => {
-    const clothing = items.filter((item) => item.category !== "body_reference");
-    return {
-      clean: clothing.filter((item) => (item.laundry_status || "clean") === "clean").length,
-      rewear: clothing.filter((item) => ["rewear_ok", "worn_once"].includes(item.laundry_status || "")).length,
-      inWash: clothing.filter((item) => ["needs_wash", "drying"].includes(item.laundry_status || "")).length
-    };
-  }, [items]);
-
-  const loadItems = useCallback(async () => {
-    if (!activeProfileId) {
-      setItems([]);
-      return;
+  const loadWeather = useCallback(async () => {
+    setWeatherLoading(true);
+    try {
+      setWeather(await fetchWeatherSummary(selectedDate));
+    } catch {
+      setWeather("Auckland/NZ weather unavailable right now — choose practical layers and weather-safe shoes if rain is likely.");
+    } finally {
+      setWeatherLoading(false);
     }
+  }, [selectedDate]);
 
-    const { data, error } = await supabase
-      .from("wardrobe_items")
-      .select("*")
-      .eq("profile_id", activeProfileId)
-      .eq("is_archived", false)
-      .order("created_at", { ascending: false });
-
-    if (!error) {
-      const loaded = (data ?? []) as WardrobeItem[];
-      setItems(loaded);
-      const firstBody = loaded.find((item) => item.category === "body_reference");
-      setBodyId((current) => {
-        if (current && loaded.some((item) => item.id === current)) return current;
-        return firstBody?.id || "";
-      });
-    } else setError(error.message);
-  }, [activeProfileId]);
-
-  useEffect(() => {
-    if (!loadingProfiles) void loadItems();
-  }, [loadingProfiles, loadItems]);
+  const loadCalendarContext = useCallback(async () => {
+    if (!activeProfileId) return;
+    setCalendarLoading(true);
+    try {
+      const url = new URL("/api/calendar/context", window.location.origin);
+      url.searchParams.set("profileId", activeProfileId);
+      url.searchParams.set("date", selectedDate);
+      const response = await fetch(url.toString());
+      const payload = await readJson(response);
+      setCalendarContext(payload.context || "No connected calendar yet.");
+    } catch {
+      setCalendarContext("Calendar not connected yet. Add meetings or plans in the brief if needed.");
+    } finally {
+      setCalendarLoading(false);
+    }
+  }, [activeProfileId, selectedDate]);
 
   useEffect(() => {
-    const handle = window.setInterval(() => {
-      const today = todayIso();
-      setNzClockLabel(nzNowLabel());
-      if (today !== todayRef.current) {
-        setSelectedDate((current) => current === todayRef.current ? today : current);
-        todayRef.current = today;
-      }
-    }, 60_000);
-
-    setNzClockLabel(nzNowLabel());
+    const handle = window.setInterval(() => setNzClock(nzNowLabel()), 60_000);
+    setNzClock(nzNowLabel());
     return () => window.clearInterval(handle);
   }, []);
 
   useEffect(() => {
-    async function hydrateSession() {
-      if (!activeProfileId || loadingProfiles) return;
-      setHydrated(false);
-      activeHydrationKeyRef.current = hydrationKey;
-      setError("");
-      setSessionId("");
-      setResult(null);
-      setPreviewImages({});
+    if (typeof window === "undefined") return;
+    const savedWeather = localStorage.getItem(WEATHER_PREF_KEY);
+    const savedCalendar = localStorage.getItem(CALENDAR_PREF_KEY);
+    const savedAuto = localStorage.getItem(AUTOGEN_PREF_KEY);
+    const weatherEnabled = savedWeather !== "false";
+    const calendarEnabled = savedCalendar !== "false";
+    setUseLiveWeather(weatherEnabled);
+    setUseCalendar(calendarEnabled);
+    setAutoMorning(savedAuto !== "false");
+  }, []);
 
-      let local: Partial<StylistSession> & { last_recommendation?: Recommendation } = {};
+  useEffect(() => {
+    if (useLiveWeather) void loadWeather();
+  }, [useLiveWeather, loadWeather]);
+
+  useEffect(() => {
+    if (useCalendar) void loadCalendarContext();
+  }, [useCalendar, loadCalendarContext]);
+
+  useEffect(() => {
+    if (!activeProfileId || loadingProfiles) return;
+    async function load() {
+      setError("");
+      let query = supabase
+        .from("wardrobe_items")
+        .select("*")
+        .eq("profile_id", activeProfileId)
+        .eq("is_archived", false)
+        .order("created_at", { ascending: false });
+      const { data, error } = await query;
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      const loaded = (data ?? []) as WardrobeItem[];
+      setItems(loaded);
+      const firstBody = loaded.find((item) => item.category === "body_reference");
+      setBodyId((current) => current || firstBody?.id || "");
+    }
+    void load();
+  }, [activeProfileId, loadingProfiles]);
+
+  useEffect(() => {
+    if (!activeProfileId || loadingProfiles) return;
+    async function hydrate() {
+      setHydrated(false);
+      lastHydration.current = hydrationKey;
+      setError("");
+      setResult(null);
+      setPreviews({});
+      setSessionId("");
+
       const localRaw = localStorage.getItem(`wardrobeAI:stylist:${hydrationKey}`);
+      let local: Partial<StylistSession> & { last_recommendation?: Recommendation } = {};
       if (localRaw) {
         try { local = JSON.parse(localRaw); } catch { local = {}; }
       }
@@ -158,98 +217,101 @@ export default function PlannerPage() {
         .limit(1)
         .maybeSingle();
 
-      if (activeHydrationKeyRef.current !== hydrationKey) return;
-
+      if (lastHydration.current !== hydrationKey) return;
       const session = (data as StylistSession | null) || local;
       if (session?.id) setSessionId(session.id);
       setDayContext(session?.day_context || local.day_context || "");
-      setWeather(session?.weather_summary || local.weather_summary || "");
-      setVibe(session?.desired_vibe || local.desired_vibe || "");
+      if (session?.weather_summary || local.weather_summary) setWeather(session?.weather_summary || local.weather_summary || "");
+      if (session?.desired_vibe || local.desired_vibe) setVibe(session?.desired_vibe || local.desired_vibe || vibe);
       if (session?.active_body_item_id || local.active_body_item_id) setBodyId(session.active_body_item_id || local.active_body_item_id || "");
       const savedRecommendation = (session?.last_recommendation || local.last_recommendation) as Recommendation | undefined;
-      if (savedRecommendation?.outfits?.length) setResult(savedRecommendation);
+      if (savedRecommendation?.outfits?.length) setResult({ ...savedRecommendation, outfits: savedRecommendation.outfits.slice(0, 2) });
       setHydrated(true);
     }
-
-    void hydrateSession();
-  }, [activeProfileId, selectedDate, hydrationKey, loadingProfiles]);
-
-  const persistSession = useCallback(async (recommendation?: Recommendation | null) => {
-    if (!activeProfileId) return sessionId;
-    const payload = {
-      owner_id: "demo-user",
-      profile_id: activeProfileId,
-      selected_date: selectedDate,
-      day_context: dayContext || null,
-      weather_summary: weather || null,
-      desired_vibe: vibe || null,
-      active_body_item_id: bodyId || null,
-      draft_prompt: dayContext || null,
-      last_recommendation: recommendation ?? result ?? null,
-      updated_at: new Date().toISOString()
-    };
-
-    localStorage.setItem(`wardrobeAI:stylist:${hydrationKey}`, JSON.stringify(payload));
-
-    setSaving(true);
-    const saved = sessionId
-      ? await supabase.from("stylist_sessions").update(payload).eq("id", sessionId).select("id").single()
-      : await supabase.from("stylist_sessions").insert(payload).select("id").single();
-    setSaving(false);
-
-    if (!saved.error && saved.data?.id) {
-      setSessionId(saved.data.id);
-      return saved.data.id as string;
-    }
-
-    return sessionId;
-  }, [activeProfileId, bodyId, dayContext, hydrationKey, result, selectedDate, sessionId, vibe, weather]);
+    void hydrate();
+  }, [activeProfileId, hydrationKey, loadingProfiles, selectedDate, vibe]);
 
   useEffect(() => {
-    if (!hydrated || !activeProfileId) return;
-    const handle = window.setTimeout(() => {
-      void persistSession();
-    }, 900);
-    return () => window.clearTimeout(handle);
-  }, [activeProfileId, bodyId, dayContext, hydrated, persistSession, selectedDate, vibe, weather]);
-
-  useEffect(() => {
+    if (!sessionId) return;
     async function loadPreviews() {
-      if (!sessionId) return;
       const { data } = await supabase
         .from("outfit_previews")
         .select("*")
         .eq("stylist_session_id", sessionId)
         .eq("status", "complete")
         .order("created_at", { ascending: false });
-
       const next: Record<string, string> = {};
       for (const preview of (data ?? []) as OutfitPreview[]) {
         if (!next[preview.look_label] && preview.output_base64) next[preview.look_label] = `data:image/png;base64,${preview.output_base64}`;
         if (!next[preview.look_label] && preview.output_image_url) next[preview.look_label] = preview.output_image_url;
       }
-      setPreviewImages(next);
+      setPreviews(next);
     }
     void loadPreviews();
   }, [sessionId]);
 
+  const byId = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
+  const bodyRefs = useMemo(() => items.filter((item) => item.category === "body_reference"), [items]);
+  const bodyRef = bodyRefs.find((item) => item.id === bodyId) || bodyRefs[0] || null;
+  const availableItems = useMemo(
+    () => items.filter((item) => item.category !== "body_reference" && !["needs_wash", "drying", "unavailable"].includes(item.laundry_status || "clean")),
+    [items],
+  );
+  const dateChoices = useMemo(() => Array.from({ length: 5 }, (_, index) => addDaysToIsoDate(nzTodayIso(), index)), []);
+
+  function setPreference(key: string, value: boolean) {
+    localStorage.setItem(key, String(value));
+  }
+
+  function combinedContext() {
+    return [
+      useCalendar ? calendarContext : "Calendar ignored by preference.",
+      dayContext.trim(),
+    ].filter(Boolean).join("\n");
+  }
+
+  async function persistLocal(recommendation?: Recommendation | null, nextSessionId?: string) {
+    if (!activeProfileId) return;
+    const payload = {
+      owner_id: "demo-user",
+      profile_id: activeProfileId,
+      selected_date: selectedDate,
+      day_context: dayContext || null,
+      weather_summary: useLiveWeather ? weather : "Weather ignored by preference.",
+      desired_vibe: vibe || null,
+      active_body_item_id: bodyId || null,
+      last_recommendation: recommendation ?? result,
+      id: nextSessionId || sessionId,
+      updated_at: new Date().toISOString(),
+    };
+    localStorage.setItem(`wardrobeAI:stylist:${hydrationKey}`, JSON.stringify(payload));
+  }
+
   async function recommend() {
     setError("");
-    setResult(null);
-    setPreviewImages({});
+    setCardErrors({});
     setLoading(true);
     try {
       const response = await fetch("/api/recommend-outfits", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profileId: activeProfileId, sessionId, bodyId, selectedDate, dayContext, weather, vibe })
+        body: JSON.stringify({
+          profileId: activeProfileId,
+          sessionId,
+          bodyId: bodyRef?.id,
+          selectedDate,
+          dayContext: combinedContext() || "No calendar details added. Suggest a practical look for today.",
+          weather: useLiveWeather ? weather || "Use live NZ weather if available." : "Ignore weather for this recommendation.",
+          vibe,
+        }),
       });
-      const payload = await response.json();
+      const payload = await readJson(response);
       if (!response.ok) throw new Error(payload.error || "Recommendation failed");
       const recommendation = payload.recommendation as Recommendation;
+      recommendation.outfits = recommendation.outfits.slice(0, 2);
       setResult(recommendation);
       if (payload.sessionId) setSessionId(payload.sessionId);
-      await persistSession(recommendation);
+      await persistLocal(recommendation, payload.sessionId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Recommendation failed");
     } finally {
@@ -257,340 +319,267 @@ export default function PlannerPage() {
     }
   }
 
+  function saveForTryOn(outfit: OutfitPlan, lookLabel: string) {
+    const selectedIds = outfit.item_ids.filter((id) => byId.has(id));
+    const payload = {
+      profileId: activeProfileId,
+      selectedDate,
+      lookLabel,
+      bodyId: bodyRef?.id || bodyId,
+      selectedIds,
+      occasion: `${formatNzCalendarDate(selectedDate)} · ${dayContext || "today"}`,
+      weather: useLiveWeather ? weather : "Weather ignored by preference",
+      notes: `${outfit.summary}\n\n${outfit.why_it_works}\nUse only this saved outfit.`,
+    };
+    localStorage.setItem(selectedKey(activeProfileId, selectedDate), JSON.stringify(payload));
+    localStorage.setItem("wardrobeAI:dressMeSelection", JSON.stringify(payload));
+  }
+
   async function generateLook(outfit: OutfitPlan, lookLabel: string) {
-    setError("");
     if (!bodyRef) {
-      setError("Upload/select a body reference before generating a look on you.");
+      setError("Add a body reference photo first.");
       return;
     }
     const selected = outfit.item_ids.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
-    if (!selected.length) {
-      setError("This look has no valid wardrobe items.");
+    if (selected.length < 1) {
+      setError("This look has no usable wardrobe items.");
       return;
     }
-
-    setGeneratingLooks((current) => ({ ...current, [lookLabel]: true }));
+    saveForTryOn(outfit, lookLabel);
+    setPreviewLoading(lookLabel);
+    setCardErrors((current) => ({ ...current, [lookLabel]: "" }));
+    setError("");
     try {
-      const savedSessionId = sessionId || await persistSession(result);
       const response = await fetch("/api/generate-outfit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           profileId: activeProfileId,
-          sessionId: savedSessionId,
+          sessionId,
           lookLabel,
           body: bodyRef,
           selected,
-          occasion: `${selectedDay} ${selectedDate}: ${dayContext}`,
-          weather,
-          notes: `${outfit.summary}\n\n${outfit.why_it_works}\nUse only this look's selected wardrobe items. Preserve identity and body proportions.`
-        })
+          occasion: `${formatNzCalendarDate(selectedDate)} · ${dayContext || "today"}`,
+          weather: useLiveWeather ? weather : "Weather ignored by preference",
+          notes: outfit.why_it_works,
+        }),
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Generation failed");
-      setPreviewImages((current) => ({ ...current, [lookLabel]: payload.imageDataUrl }));
+      const payload = await readJson(response);
+      if (!response.ok) throw new Error(payload.error || "Preview generation failed");
+      if (!payload.imageDataUrl) throw new Error("Generation completed but returned no image.");
+      setPreviews((current) => ({ ...current, [lookLabel]: payload.imageDataUrl }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Generation failed");
+      const message = err instanceof Error ? err.message : "Preview generation failed";
+      setCardErrors((current) => ({ ...current, [lookLabel]: message }));
     } finally {
-      setGeneratingLooks((current) => ({ ...current, [lookLabel]: false }));
+      setPreviewLoading("");
     }
   }
 
-  function useInDressMe(outfit: OutfitPlan) {
-    localStorage.setItem(
-      "wardrobeAI:dressMeSelection",
-      JSON.stringify({
-        profileId: activeProfileId,
-        selectedDate,
-        bodyId,
-        selectedIds: outfit.item_ids,
-        occasion: `${selectedDay} ${selectedDate}: ${dayContext}`,
-        weather,
-        notes: `${outfit.summary}\n\n${outfit.why_it_works}\nUse the real body reference and selected accessories. Preserve identity.`
-      })
-    );
-    window.location.href = "/generate";
+  function toggleSwap(lookLabel: string, itemId: string) {
+    setSwapSelections((current) => {
+      const selected = new Set(current[lookLabel] ?? []);
+      if (selected.has(itemId)) selected.delete(itemId);
+      else selected.add(itemId);
+      return { ...current, [lookLabel]: Array.from(selected) };
+    });
   }
 
-  async function fetchWeatherForPosition(position: GeolocationPosition) {
-    setLocationStatus("Fetching live forecast…");
-    const lat = position.coords.latitude.toFixed(4);
-    const lon = position.coords.longitude.toFixed(4);
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=${encodeURIComponent(NZ_TIME_ZONE)}&start_date=${selectedDate}&end_date=${selectedDate}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("Weather service did not return a forecast.");
-    const payload = await response.json();
-    const daily = payload.daily;
-    const current = payload.current;
-    const code = Number(daily.weather_code?.[0] ?? current?.weather_code ?? 0);
-    const max = Math.round(Number(daily.temperature_2m_max?.[0] ?? 0));
-    const min = Math.round(Number(daily.temperature_2m_min?.[0] ?? 0));
-    const rain = Math.round(Number(daily.precipitation_probability_max?.[0] ?? 0));
-    const wind = Math.round(Number(daily.wind_speed_10m_max?.[0] ?? current?.wind_speed_10m ?? 0));
-    const currentTemp = current?.temperature_2m == null ? "" : ` Current: ${Math.round(Number(current.temperature_2m))}°C.`;
-    const timeLabel = nzTimeOnlyLabel();
-    const dateLabel = formatNzCalendarDate(selectedDate);
-    setWeather(`NZ time now ${timeLabel}. Forecast for ${dateLabel}: ${max}°C / ${min}°C, ${weatherCodeLabel(code)}, ${rain}% rain chance, wind up to ${wind} km/h.${currentTemp} Based on my current location.`);
-    setLocationStatus("Weather loaded in NZ time.");
+  async function swapSelected(outfit: OutfitPlan, lookLabel: string) {
+    const swapItemIds = swapSelections[lookLabel] ?? [];
+    if (!swapItemIds.length) return outfit;
+    setCardErrors((current) => ({ ...current, [lookLabel]: "" }));
+    const response = await fetch("/api/swap-outfit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profileId: activeProfileId, outfit, swapItemIds }),
+    });
+    const payload = await readJson(response);
+    if (!response.ok) throw new Error(payload.error || "Swap failed");
+    const updated = payload.outfit as OutfitPlan;
+    setResult((current) => current ? {
+      ...current,
+      outfits: current.outfits.map((entry, index) => (String.fromCharCode(65 + index) === lookLabel ? updated : entry)),
+    } : current);
+    setSwapSelections((current) => ({ ...current, [lookLabel]: [] }));
+    setPreviews((current) => {
+      const copy = { ...current };
+      delete copy[lookLabel];
+      return copy;
+    });
+    return updated;
   }
 
-  async function fetchLiveWeather() {
-    setError("");
-    setWeatherLoading(true);
-    setLocationStatus("Requesting location…");
-
+  async function swapAndGenerate(outfit: OutfitPlan, lookLabel: string) {
+    setPreviewLoading(lookLabel);
     try {
-      if (!navigator.geolocation) throw new Error("Browser geolocation is not available.");
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false, timeout: 12000, maximumAge: 30 * 60 * 1000 });
-      });
-
-      localStorage.setItem("wardrobeAI:lastLocation", JSON.stringify({
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-        saved_at: new Date().toISOString()
-      }));
-      await fetchWeatherForPosition(position);
+      const updated = await swapSelected(outfit, lookLabel);
+      await generateLook(updated, lookLabel);
     } catch (err) {
-      setLocationStatus("");
-      setError(err instanceof Error ? err.message : "Could not fetch live weather.");
+      setCardErrors((current) => ({ ...current, [lookLabel]: err instanceof Error ? err.message : "Swap failed" }));
     } finally {
-      setWeatherLoading(false);
+      setPreviewLoading("");
     }
   }
 
-  function startVoiceInput() {
-    setError("");
-    const Recognition = getSpeechRecognition();
-    if (!Recognition) {
-      setError("Voice input is not available in this browser. Try Safari/Chrome on iPhone or desktop Chrome.");
-      return;
-    }
-
-    const recognition = new Recognition();
-    recognition.lang = "en-NZ";
-    recognition.interimResults = false;
-    recognition.continuous = false;
-    setSpeechActive(true);
-
-    recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((result: any) => result[0]?.transcript)
-        .filter(Boolean)
-        .join(" ")
-        .trim();
-      if (transcript) setDayContext((current) => [current, transcript].filter(Boolean).join(current ? "\n" : ""));
-    };
-    recognition.onerror = () => setError("Voice input stopped before capturing text.");
-    recognition.onend = () => setSpeechActive(false);
-    recognition.start();
-  }
-
-  const scheduleRows = dayContext
-    .split(/[\n·]/)
-    .map((row) => row.trim())
-    .filter(Boolean)
-    .slice(0, 4);
+  const primaryLook = result?.outfits?.[0];
 
   return (
-    <div className="stack">
-      <section className="planner-shell card">
-        <div className="planner-intro">
-          <div className="planner-heading">
-            <div className="spark-mark">✦</div>
-            <div>
-              <h1 className="planner-title">The Wardrobe</h1>
-              <p className="planner-subtitle">Looks for {activeProfile?.display_name || "the active profile"}, generated separately on the selected body reference.</p>
-            </div>
-          </div>
-
-          <div className="chip-group">
-            <span className="small-chip">NZ time: {nzClockLabel}</span>
-            {weekdayOptions.map((day) => (
-              <button
-                type="button"
-                key={day}
-                className={`seg-chip ${selectedDay === day ? "is-active" : ""}`}
-                onClick={() => {
-                  const today = todayIso();
-                  const todayIndex = weekdayOptions.indexOf(dayFromDate(today));
-                  const targetIndex = weekdayOptions.indexOf(day);
-                  const diff = targetIndex - todayIndex;
-                  setSelectedDate(addDaysToIsoDate(today, diff));
-                }}
-              >
-                {day}
-              </button>
-            ))}
-          </div>
+    <div className="page-shell ux-page">
+      <section className="ux-hero card">
+        <div>
+          <span className="eyebrow">AI stylist</span>
+          <h1>Today’s looks should already be waiting.</h1>
+          <p className="lead-copy">At 5:00am NZ time the app prepares two outfits using profile, weather and calendar context. You only regenerate when you want to swap something.</p>
         </div>
-
-        <div className="planner-two-col">
-          <div className="planner-form card inset-card">
-            <span className="eyebrow dark">Stylist</span>
-            <h2 className="section-h2">Brief the stylist.</h2>
-            <div className="form">
-              <label>
-                Date
-                <input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || todayIso())} />
-              </label>
-              <label>
-                Body reference photo
-                <select value={bodyId} onChange={(event) => setBodyId(event.target.value)}>
-                  <option value="">Choose body reference</option>
-                  {bodyRefs.map((item) => (
-                    <option key={item.id} value={item.id}>{item.name}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Day context / schedule
-                <textarea
-                  value={dayContext}
-                  onChange={(event) => setDayContext(event.target.value)}
-                  placeholder="Tell the stylist what is happening today. Example: yacht club breakfast, rain, cold, smart but not too corporate."
-                />
-              </label>
-              <div className="button-row">
-                <button type="button" className="secondary-button" onClick={startVoiceInput}>{speechActive ? "Listening…" : "Speak brief"}</button>
-              </div>
-              <label>
-                Weather / outside time
-                <input
-                  value={weather}
-                  onChange={(event) => setWeather(event.target.value)}
-                  placeholder="Fetch live weather or type it manually. Example: cold, showers, 20 minutes outside."
-                />
-              </label>
-              <div className="button-row">
-                <button type="button" className="secondary-button" onClick={fetchLiveWeather} disabled={weatherLoading}>{weatherLoading ? "Fetching weather…" : "Use live NZ-time weather for this date"}</button>
-                {locationStatus ? <span className="muted-small">{locationStatus}</span> : null}
-              </div>
-              <label>
-                Desired vibe
-                <input
-                  value={vibe}
-                  onChange={(event) => setVibe(event.target.value)}
-                  placeholder="Optional: polished, relaxed-smart, client-ready, school-run practical, date night, etc."
-                />
-              </label>
-              <div className="button-row">
-                <button type="button" onClick={recommend} disabled={loading || !activeProfileId}>{loading ? "Stylist is thinking..." : "Recommend looks"}</button>
-                <button type="button" className="secondary-button" onClick={() => persistSession()} disabled={saving || !activeProfileId}>{saving ? "Saving…" : "Save session"}</button>
-                <a className="ghost-link" href="/wardrobe">Wardrobe</a>
-              </div>
-              {profileError ? <p className="error">Profile error: {profileError}</p> : null}
-              {error ? <p className="error">{error}</p> : null}
-              {saving ? <p className="muted-small">Saving session…</p> : null}
-            </div>
-          </div>
-
-          <aside className="day-brief card inset-card">
-            <span className="eyebrow dark">Today</span>
-            <h2 className="day-date">{selectedDay}</h2>
-            <p className="weather-line">{weather || "Add weather manually or tap live NZ-time weather."}</p>
-            <div className="weather-chip-row">
-              <span className="small-chip">profile aware</span>
-              <span className="small-chip">camera aware</span>
-              <span className="small-chip">weather aware</span>
-            </div>
-            <div className="divider" />
-            <div className="schedule-list">
-              <span className="section-label">Schedule</span>
-              {scheduleRows.length ? scheduleRows.map((row) => <p key={row}>{row}</p>) : <p>Add your schedule in the day context field or speak it in.</p>}
-            </div>
-            <div className="divider" />
-            <div className="schedule-list">
-              <span className="section-label">Read</span>
-              <p>
-                Dressing to {activeProfile?.display_name || "the active profile"}: {activeProfile?.style_profile || "run the profile migration first."}
-              </p>
-            </div>
-            <div className="divider" />
-            <div className="wardrobe-state-panel">
-              <span className="section-label">Wardrobe state</span>
-              <div className="wardrobe-state-row">
-                <span className="laundry-pill is-clean">{wardrobeState.clean} clean</span>
-                <span className="laundry-pill is-rewear">{wardrobeState.rewear} re-wear</span>
-                <span className="laundry-pill is-wash">{wardrobeState.inWash} in wash</span>
-              </div>
-            </div>
-          </aside>
+        <div className="ux-status-card">
+          <strong>{activeProfile?.display_name || "Profile"}</strong>
+          <span>{nzClock} NZ</span>
+          <small>{hydrated && primaryLook ? "Morning looks loaded" : "Ready to create today’s two looks"}</small>
         </div>
       </section>
 
+      <section className="ux-control-strip card">
+        <div className="date-pill-row">
+          {dateChoices.map((date) => (
+            <button key={date} type="button" className={date === selectedDate ? "date-pill active" : "date-pill"} onClick={() => setSelectedDate(date)}>
+              <span>{weekdayFromIsoDate(date).slice(0, 3)}</span>
+              <strong>{date.slice(-2)}</strong>
+            </button>
+          ))}
+        </div>
+        <label className="switch-row">
+          <input type="checkbox" checked={useLiveWeather} onChange={(event) => { setUseLiveWeather(event.target.checked); setPreference(WEATHER_PREF_KEY, event.target.checked); }} />
+          <span>Weather auto</span>
+        </label>
+        <label className="switch-row">
+          <input type="checkbox" checked={useCalendar} onChange={(event) => { setUseCalendar(event.target.checked); setPreference(CALENDAR_PREF_KEY, event.target.checked); }} />
+          <span>Calendar auto</span>
+        </label>
+        <label className="switch-row">
+          <input type="checkbox" checked={autoMorning} onChange={(event) => { setAutoMorning(event.target.checked); setPreference(AUTOGEN_PREF_KEY, event.target.checked); }} />
+          <span>5am auto</span>
+        </label>
+      </section>
+
+      <section className="stylist-command-grid">
+        <div className="card command-card visual-first-card">
+          <label className="big-brief-label">
+            <span>Anything unusual today?</span>
+            <textarea
+              value={dayContext}
+              onChange={(event) => setDayContext(event.target.value)}
+              placeholder="Optional. Example: yacht club breakfast, rain, cold, not sporty."
+              rows={4}
+            />
+          </label>
+          <div className="compact-input-grid">
+            <label>
+              <span>Body reference</span>
+              <select value={bodyRef?.id || bodyId} onChange={(event) => setBodyId(event.target.value)}>
+                <option value="">Choose body reference</option>
+                {bodyRefs.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Vibe</span>
+              <input value={vibe} onChange={(event) => setVibe(event.target.value)} />
+            </label>
+          </div>
+
+          <div className="auto-context-grid">
+            <div className="context-chip-card"><span>☁️</span><strong>{weatherLoading ? "Weather loading…" : "Weather"}</strong><small>{weather || "Automatic Auckland/NZ fallback"}</small></div>
+            <div className="context-chip-card"><span>📅</span><strong>{calendarLoading ? "Calendar loading…" : "Calendar"}</strong><small>{calendarContext || "Hook ready; no connected calendar yet"}</small></div>
+          </div>
+
+          <button type="button" className="primary-button wide-action" onClick={recommend} disabled={loading || availableItems.length < 2 || !activeProfileId}>
+            {loading ? "Preparing two looks…" : result?.outfits?.length ? "Refresh today’s two looks" : "Create today’s two looks"}
+          </button>
+          {profileError ? <p className="error">Profile error: {profileError}</p> : null}
+          {availableItems.length < 2 ? <p className="notice">Add at least two available clothing items for this profile.</p> : null}
+          {error ? <p className="error">{error}</p> : null}
+        </div>
+
+        <aside className="card closet-snapshot-card">
+          <span className="eyebrow dark">Visual closet</span>
+          <div className="closet-metrics-grid">
+            <strong>{availableItems.length}</strong><span>ready pieces</span>
+            <strong>{bodyRefs.length}</strong><span>body refs</span>
+          </div>
+          <div className="mini-closet-grid">
+            {availableItems.slice(0, 6).map((item) => <img src={item.image_url} alt={item.name} key={item.id} />)}
+          </div>
+          <a className="ghost-link" href="/wardrobe">Manage closet</a>
+        </aside>
+      </section>
+
       {result ? (
-        <section className="stack">
-          <section className="card recommendation-header">
-            <span className="eyebrow dark">Stylist read</span>
-            <h2 className="section-h2">{result.stylist_positioning}</h2>
-            <p>{result.day_brief}</p>
-            {result.missing_info?.length ? <p className="notice">Missing info: {result.missing_info.join(", ")}</p> : null}
-          </section>
+        <section className="looks-board">
+          <div className="section-heading-row">
+            <div>
+              <span className="eyebrow dark">Two outfits only</span>
+              <h2>{result.stylist_positioning}</h2>
+              <p>{result.day_brief}</p>
+            </div>
+          </div>
 
-          {result.outfits.map((outfit, index) => {
-            const lookLabel = String.fromCharCode(65 + index);
-            const outfitItems = outfit.item_ids
-              .map((id) => byId.get(id))
-              .filter(Boolean) as WardrobeItem[];
-            const generatedImage = previewImages[lookLabel];
-            const isGenerating = Boolean(generatingLooks[lookLabel]);
-
-            return (
-              <article className="look-layout card" key={`${outfit.label}-${index}`}>
-                <div className="look-preview-frame">
-                  <span className="section-label">On you · Look {lookLabel}</span>
-                  {generatedImage ? (
-                    <img className="body-preview-image" src={generatedImage} alt={`Generated outfit preview for Look ${lookLabel}`} />
-                  ) : (
-                    <div className="tryon-placeholder">
-                      <strong>{isGenerating ? `Generating Look ${lookLabel} on you…` : `Look ${lookLabel} not generated yet`}</strong>
-                      <span>This no longer shows the raw body reference as a fake preview. Generate each look separately.</span>
+          <div className="look-card-grid two-look-grid">
+            {result.outfits.slice(0, 2).map((outfit, index) => {
+              const lookLabel = String.fromCharCode(65 + index);
+              const outfitItems = outfit.item_ids.map((id) => byId.get(id)).filter(Boolean) as WardrobeItem[];
+              const selectedForSwap = new Set(swapSelections[lookLabel] ?? []);
+              const hasSwaps = selectedForSwap.size > 0;
+              return (
+                <article className="card look-card-visual" key={`${outfit.label}-${index}`}>
+                  <div className="look-card-media">
+                    {previews[lookLabel] ? (
+                      <img className="generated-look-image" src={previews[lookLabel]} alt={`Generated Look ${lookLabel}`} />
+                    ) : (
+                      <div className="outfit-collage">
+                        {outfitItems.slice(0, 5).map((item) => <img key={item.id} src={item.image_url} alt={item.name} />)}
+                      </div>
+                    )}
+                    <span className="look-badge">Look {lookLabel}</span>
+                  </div>
+                  <div className="look-card-copy">
+                    <h3>{outfit.summary}</h3>
+                    <div className="look-meta-row">
+                      <span className="small-chip">formality {outfit.formality_score}/10</span>
+                      <span className="small-chip">warmth {outfit.warmth_score}/10</span>
                     </div>
-                  )}
-                  <button type="button" onClick={() => generateLook(outfit, lookLabel)} disabled={!bodyRef || isGenerating}>
-                    {isGenerating ? `Generating Look ${lookLabel}...` : `Generate Look ${lookLabel} on me`}
-                  </button>
-                </div>
-
-                <div className="look-copy">
-                  <span className="section-label">Look {lookLabel}</span>
-                  <h3 className="look-name">{outfit.summary}</h3>
-                  <div className="look-meta-row">
-                    <span className="small-chip">formality {outfit.formality_score}/10</span>
-                    <span className="small-chip">warmth {outfit.warmth_score}/10</span>
+                    <p>{outfit.why_it_works}</p>
+                    <div className="swap-thumb-grid">
+                      {outfitItems.map((item) => (
+                        <button key={item.id} type="button" className={selectedForSwap.has(item.id) ? "swap-thumb selected" : "swap-thumb"} onClick={() => toggleSwap(lookLabel, item.id)}>
+                          <img src={item.image_url} alt={item.name} />
+                          <span>{selectedForSwap.has(item.id) ? "Swap" : item.category}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {cardErrors[lookLabel] ? <p className="error compact-error">{cardErrors[lookLabel]}</p> : null}
+                    <div className="button-row wrap-buttons">
+                      {hasSwaps ? (
+                        <button type="button" className="primary-button" onClick={() => swapAndGenerate(outfit, lookLabel)} disabled={previewLoading === lookLabel}>
+                          {previewLoading === lookLabel ? "Swapping…" : `Swap selected + regenerate`}
+                        </button>
+                      ) : (
+                        <button type="button" className="primary-button" onClick={() => generateLook(outfit, lookLabel)} disabled={previewLoading === lookLabel || !bodyRef}>
+                          {previewLoading === lookLabel ? "Generating…" : previews[lookLabel] ? "Regenerate" : `Generate Look ${lookLabel}`}
+                        </button>
+                      )}
+                      <a className="secondary-button" href="/generate" onClick={() => saveForTryOn(outfit, lookLabel)}>Open try-on</a>
+                    </div>
                   </div>
-
-                  <div className="items-grid-lite">
-                    {outfitItems.map((item) => (
-                      <article className="mini-item-card" key={item.id}>
-                        <img src={item.image_url} alt={item.name} />
-                        <div>
-                          <strong>{item.name}</strong>
-                          <span>{(item.category || "item").replaceAll("_", " ")}{(item.angle_count ?? 1) > 1 ? ` · ${item.angle_count} angles` : ""}</span>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-
-                  <blockquote className="style-read">{outfit.why_it_works}</blockquote>
-                  {outfit.watch_outs?.length ? <p className="muted-small">Watch outs: {outfit.watch_outs.join(" · ")}</p> : null}
-
-                  <div className="button-row">
-                    <button type="button" className="secondary-button" onClick={() => useInDressMe(outfit)} disabled={!bodyId}>Open this look in Dress Me</button>
-                  </div>
-                </div>
-              </article>
-            );
-          })}
+                </article>
+              );
+            })}
+          </div>
         </section>
       ) : (
-        <section className="card empty-state-card">
-          <span className="eyebrow dark">Next</span>
-          <h2 className="section-h2">Get the AI stylist to suggest complete looks.</h2>
-          <p>
-            Tap <strong>Recommend looks</strong>. Each recommendation will show a placeholder first, then you generate Look A/B/C on your selected body reference one by one.
-          </p>
+        <section className="card empty-state-card soft-empty visual-empty">
+          <span className="eyebrow dark">Morning concierge</span>
+          <h2>No wardrobe dump. Two looks, then swap.</h2>
+          <p>The 5am job prepares this automatically. For now, create today’s two looks once, then only regenerate after selecting items to swap.</p>
         </section>
       )}
     </div>

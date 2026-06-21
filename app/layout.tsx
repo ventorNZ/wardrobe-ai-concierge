@@ -1,43 +1,35 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import "./styles.css";
 import ProfileSwitcher from "@/components/ProfileSwitcher";
 
 export const metadata: Metadata = {
   title: "The Wardrobe Concierge",
-  description:
-    "AI wardrobe ingestion, outfit planning, and realistic outfit preview on your own body reference.",
+  description: "AI wardrobe styling, weather-aware looks, calendar-ready context, and visual try-on previews.",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en-NZ">
       <body>
-        <nav className="nav">
-          <div className="nav-inner">
-            <Link href="/" className="brand">
-              <span className="brand-mark">✦</span>
-              <span className="brand-copy">
-                <strong>The Wardrobe AI concierge</strong>
-                <em>Personal styling, weather, and try-on previews</em>
-              </span>
-            </Link>
+        <header className="app-shell-header">
+          <a className="brand-lockup" href="/" aria-label="Wardrobe concierge home">
+            <span className="brand-mark">✦</span>
+            <span>
+              <strong>Wardrobe Concierge</strong>
+              <small>Two looks. Less tapping.</small>
+            </span>
+          </a>
 
-            <div className="links">
-              <Link href="/upload">Upload</Link>
-              <Link href="/wardrobe">Wardrobe</Link>
-              <Link href="/stylist">Stylist</Link>
-              <Link href="/dress-me">Dress Me</Link>
-              <ProfileSwitcher />
-            </div>
-          </div>
-        </nav>
+          <nav className="top-nav" aria-label="Main navigation">
+            <a href="/planner">Stylist</a>
+            <a href="/generate">Try-on</a>
+            <a href="/wardrobe">Closet</a>
+            <a href="/upload">Add photos</a>
+          </nav>
 
-        <main className="container">{children}</main>
+          <ProfileSwitcher />
+        </header>
+        <main>{children}</main>
       </body>
     </html>
   );
